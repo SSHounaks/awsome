@@ -77,6 +77,7 @@ snapshot still completes. Full walker coverage vs. LocalStack gaps is tracked in
 
 The real Free-Tier account is the "golden" correctness check (diff the JSONL vs the console) and the only
 place ELBv2/ASG/RDS/ECS/EKS data shapes can be validated.
+Create the read-only scanner login + run the golden scan: see `docs/aws-free-tier-setup.md`.
 
 ## Layout
 
