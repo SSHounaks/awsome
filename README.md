@@ -70,9 +70,13 @@ Snapshot dir = `snapshots/<snapshot_id>/` with `records.jsonl` and `summary.json
 
 ## LocalStack caveats
 
-Community edition emulates the `Describe*` API shape and pagination well, but not full EC2 parity
-(NAT gateways, endpoints, some rule behaviors). It is the day-to-day dev target; use the real Free-Tier
-account for the "golden" correctness check (diff the JSONL vs the console).
+Community edition emulates the `Describe*` API shape and pagination well, but several services are
+**Pro-only** in 3.8.1 Community and simply 501 at the API (ELBv2, AutoScaling, RDS, ElastiCache, ECS, EKS,
+ECR). The scanner degrades (skips) a service that returns `not yet implemented`/`AccessDenied`/etc. so a
+snapshot still completes. Full walker coverage vs. LocalStack gaps is tracked in `AWS-LOCALSTACK-DIFF.md`.
+
+The real Free-Tier account is the "golden" correctness check (diff the JSONL vs the console) and the only
+place ELBv2/ASG/RDS/ECS/EKS data shapes can be validated.
 
 ## Layout
 
@@ -81,7 +85,9 @@ cmd/awsome-scanner       CLI entrypoint (flags: --endpoint-url --regions --out -
 cmd/awsome-seed          seeds a demo topology into LocalStack
 internal/awscfg          SDK config loader (endpoint override aware)
 internal/config          CLI/env config
-internal/collect         target resolution + walkers (EC2/VPC/SG) + orchestration + record model helpers
+internal/collect         target resolution + walkers (EC2-family, ELBv2, ASG, RDS, ElastiCache,
+                          Redshift, OpenSearch, DynamoDB, Lambda, ECS, EKS, S3, ECR, IAM) + orchestration + degrade-on-denied
+                          handling + record model helpers
 internal/inspect         JSONL writer + summary writer
 compose.yml              LocalStack service
 ```

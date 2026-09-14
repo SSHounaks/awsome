@@ -50,7 +50,12 @@ func emitInstance(a acc, inst types.Instance, emit *Emitter) {
 		n.Properties["state"] = string(inst.State.Name)
 	}
 	if inst.IamInstanceProfile != nil {
-		n.Properties["iam_instance_profile_arn"] = aws.ToString(inst.IamInstanceProfile.Arn)
+		if arn := aws.ToString(inst.IamInstanceProfile.Arn); arn != "" {
+			emit.Send(a.edge(n.Key, arn, "USES_PROFILE"))
+		}
+	}
+	if image := aws.ToString(inst.ImageId); image != "" {
+		emit.Send(a.edge(n.Key, a.ec2Arn("image/"+image), "RUNS_AMI"))
 	}
 	n.Name = tagValue(n.Tags, "Name")
 	emit.Send(n)

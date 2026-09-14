@@ -6,7 +6,7 @@ help:
 	@echo "make localstack-up   start LocalStack (docker compose up -d)"
 	@echo "make localstack-down stop LocalStack"
 	@echo "make seed            create demo VPC/subnet/SGs/instance in LocalStack"
-	@echo "make scan            run the phase-0 scanner against LocalStack"
+	@echo "make scan            scan LocalStack (single region us-east-1)"
 	@echo "make scan-real       run against real AWS (uses default credential chain)"
 	@echo "make tidy            go mod tidy"
 	@echo "make build           compile everything"
@@ -32,7 +32,7 @@ seed: wait
 	$(LS_ENV) $(GO) run ./cmd/awsome-seed --endpoint-url http://localhost:4566
 
 scan: wait
-	$(LS_ENV) $(GO) run ./cmd/awsome-scanner --endpoint-url http://localhost:4566
+	$(LS_ENV) $(GO) run ./cmd/awsome-scanner --endpoint-url http://localhost:4566 --regions us-east-1
 
 scan-real:
 	$(GO) run ./cmd/awsome-scanner

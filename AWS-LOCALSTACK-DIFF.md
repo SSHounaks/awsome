@@ -41,3 +41,32 @@ and what that means for the scanner, so nobody trusts emulator behavior they nev
 - **Upgrade path:** switching to LocalStack Pro closes rows 11/13/14/15/17 for dev purposes but *still*
   doesn't model AWS quotas/throttling/denial (rows 5/6) — the Free-Tier smoke stays mandatory.
 - Revisit this file whenever a Phase adds a service (λ engines, Redshift/OpenSearch walkers, rule engine).
+
+## Verified coverage on this box (LocalStack 3.8.1 Community, via Docker)
+
+Empirically confirmed single-region scan (`make scan`, us-east-1). A walker "degraded" (silently skipped)
+when the emulator returned a 501 "not yet implemented or pro feature"; the snapshot still completes.
+
+| Walkers VERIFIED against LocalStack (nodes present in snapshot) | Walkers DEGRADED here (Community gap / pro-feature) |
+|---|---|
+| EC2, VPC, SG, Subnet, RouteTable, NACL, IGW, EIP, Peering, ENI, Volume, AMI, ASG* | ELBv2 (LB/TG/listeners → `FORWARDS`) |
+| IAM (role/policy/profile + attach chain) | AutoScalingGroup (`CONTAINS`) |
+| Lambda (+ VPC edges) | RDS (+ DBSG, `USES_SUBGRP`) |
+| DynamoDB | ElastiCache |
+| Redshift (node + SG edges) | ECS, EKS |
+| S3 (buckets, ACL, policy, tags, versioning) | ECR |
+
+*AutoScalingGroup: seed creates the ASG fixture (CreateAutoScalingGroup), but instances the ASG would own
+are emulator-dependent; treat `CONTAINS` edges as REAL-VALIDATE.
+
+Gotchas confirmed by running it:
+- S3 with the Go SDK requires **path-style addressing** against a non-AWS endpoint
+  (`s3.NewFromConfig(sdk, func(o *s3.Options){ o.UsePathStyle = true })`). Virtual-host style → 500
+  "Unable to find operation for request to service s3: PUT /".
+- IAM `ListPolicies Scope:"All"` returns ~1200 AWS-managed policies in LocalStack → the walker uses
+  `Scope:"Local"` (customer-managed only) to keep snapshots meaningful (applies to real AWS too).
+- The collector **degrades instead of failing** on: EC2-built-in `not yet implemented`/`NotImplemented`,
+  `InvalidAction`, `OptInRequired`, `AccessDenied`, `UnauthorizedOperation`. This is what lets a scan
+  complete even when some services are Community gaps (row 5/6 philosophy).
+- Instance IAM-profile + AMI wiring is a real edge chain: `instance -USES_PROFILE-> profile -HAS_ROLE->
+  role -USES_POLICY-> policy` and `instance -RUNS_AMI-> ami`.

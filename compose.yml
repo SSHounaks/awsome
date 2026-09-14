@@ -4,7 +4,7 @@ services:
     ports:
       - "4566:4566"
     environment:
-      SERVICES: ec2,sts
+      SERVICES: ec2,sts,elbv2,lambda,ecs,eks,iam,autoscaling,rds,elasticache,redshift,opensearch,dynamodb,s3,ecr
       DEFAULT_REGION: us-east-1
       PERSISTENCE: "1"
     volumes:
