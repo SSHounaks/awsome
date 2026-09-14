@@ -22,9 +22,8 @@ single account. This proves enumeration correctness before we build Neo4j + dash
 
 ```sh
 eval "$(mise activate bash)"    # put go on PATH (add to ~/.bashrc)
-cp .env.example .env
-export AWS_ACCESS_KEY_ID=test
-export AWS_SECRET_ACCESS_KEY=test
+cp .env.example .env                       # LocalStack dummy creds
+set -a; source .env; set +a
 
 make localstack-up              # start LocalStack (Docker)
 make seed                       # demo VPC/subnet/SG x2 (sg-app references sg-web)/instance

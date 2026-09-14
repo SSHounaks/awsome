@@ -26,11 +26,13 @@ localstack-down:
 wait:
 	./scripts/wait-localstack.sh
 
+LS_ENV := AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY AWS_DEFAULT_REGION=us-east-1
+
 seed: wait
-	$(GO) run ./cmd/awsome-seed
+	$(LS_ENV) $(GO) run ./cmd/awsome-seed --endpoint-url http://localhost:4566
 
 scan: wait
-	$(GO) run ./cmd/awsome-scanner
+	$(LS_ENV) $(GO) run ./cmd/awsome-scanner --endpoint-url http://localhost:4566
 
 scan-real:
 	$(GO) run ./cmd/awsome-scanner

@@ -30,9 +30,12 @@ func ResolveTarget(ctx context.Context, cfg Config) (Target, error) {
 	accountID := aws.ToString(identity.Account)
 	partition := "aws"
 	if arn := aws.ToString(identity.Arn); strings.HasPrefix(arn, "arn:") {
-		parts := strings.SplitN(arn, ":", 2)
-		if len(parts) == 2 && parts[0] == "arn" {
+		parts := strings.Split(arn, ":")
+		if len(parts) >= 2 && parts[0] == "arn" {
 			partition = parts[1]
+		}
+		if partition == "" {
+			partition = "aws"
 		}
 	}
 
