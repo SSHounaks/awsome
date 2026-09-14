@@ -1,0 +1,9 @@
+# snapshots/artifacts
+snapshots/
+*.jsonl
+# env/secrets
+.env
+.env.*
+# deno/react build
+web/dist/
+web/node_modules/
