@@ -70,10 +70,10 @@ func rulesToProps(perms []types.IpPermission) []map[string]any {
 		}
 		for _, pair := range perm.UserIdGroupPairs {
 			out = append(out, map[string]any{
-				"protocol":     aws.ToString(perm.IpProtocol),
-				"source_sg":    aws.ToString(pair.GroupId),
-				"from":         intValue(perm.FromPort),
-				"to":           intValue(perm.ToPort),
+				"protocol":  aws.ToString(perm.IpProtocol),
+				"source_sg": aws.ToString(pair.GroupId),
+				"from":      intValue(perm.FromPort),
+				"to":        intValue(perm.ToPort),
 			})
 		}
 	}

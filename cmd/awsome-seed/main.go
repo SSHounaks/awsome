@@ -61,7 +61,7 @@ func main() {
 
 func createVPC(ctx context.Context, c *ec2.Client, region *string) (string, error) {
 	out, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{
-		CidrBlock: aws.String("10.10.0.0/16"),
+		CidrBlock:         aws.String("10.10.0.0/16"),
 		TagSpecifications: tagSpec(types.ResourceTypeVpc, "awsome-demo", region),
 	})
 	if err != nil {
@@ -72,8 +72,8 @@ func createVPC(ctx context.Context, c *ec2.Client, region *string) (string, erro
 
 func createSubnet(ctx context.Context, c *ec2.Client, vpcID string, region *string) (string, error) {
 	out, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{
-		VpcId:     aws.String(vpcID),
-		CidrBlock: aws.String("10.10.1.0/24"),
+		VpcId:             aws.String(vpcID),
+		CidrBlock:         aws.String("10.10.1.0/24"),
 		TagSpecifications: tagSpec(types.ResourceTypeSubnet, "awsome-demo-subnet", region),
 	})
 	if err != nil {
@@ -84,9 +84,9 @@ func createSubnet(ctx context.Context, c *ec2.Client, vpcID string, region *stri
 
 func createSG(ctx context.Context, c *ec2.Client, vpcID, name, desc string, region *string) (string, error) {
 	out, err := c.CreateSecurityGroup(ctx, &ec2.CreateSecurityGroupInput{
-		GroupName:   aws.String(name),
-		Description: aws.String(desc),
-		VpcId:       aws.String(vpcID),
+		GroupName:         aws.String(name),
+		Description:       aws.String(desc),
+		VpcId:             aws.String(vpcID),
 		TagSpecifications: tagSpec(types.ResourceTypeSecurityGroup, name, region),
 	})
 	if err != nil {
@@ -99,9 +99,9 @@ func authorizeSGFrom(ctx context.Context, c *ec2.Client, targetSG, sourceSG stri
 	_, err := c.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
 		GroupId: aws.String(targetSG),
 		IpPermissions: []types.IpPermission{{
-			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int32(8080),
-			ToPort:     aws.Int32(8080),
+			IpProtocol:       aws.String("tcp"),
+			FromPort:         aws.Int32(8080),
+			ToPort:           aws.Int32(8080),
 			UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: aws.String(sourceSG)}},
 		}},
 	})
@@ -110,12 +110,12 @@ func authorizeSGFrom(ctx context.Context, c *ec2.Client, targetSG, sourceSG stri
 
 func runInstance(ctx context.Context, c *ec2.Client, subnetID, sgID string, region *string) (string, error) {
 	out, err := c.RunInstances(ctx, &ec2.RunInstancesInput{
-		ImageId:          aws.String("ami-00000000000000000"),
-		InstanceType:     types.InstanceTypeT3Micro,
-		MinCount:         aws.Int32(1),
-		MaxCount:         aws.Int32(1),
-		SubnetId:         aws.String(subnetID),
-		SecurityGroupIds: []string{sgID},
+		ImageId:           aws.String("ami-00000000000000000"),
+		InstanceType:      types.InstanceTypeT3Micro,
+		MinCount:          aws.Int32(1),
+		MaxCount:          aws.Int32(1),
+		SubnetId:          aws.String(subnetID),
+		SecurityGroupIds:  []string{sgID},
 		TagSpecifications: tagSpec(types.ResourceTypeInstance, "awsome-demo-web-1", region),
 	})
 	if err != nil {

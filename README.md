@@ -1,13 +1,28 @@
 # AWSome — Phase 0: enumeration bootstrap
 
-Go-based scanner that enumerates AWS resources and emits a versioned **JSON-lines** snapshot
+Go-based scanner
+
+## Go version policy
+
+Toolchain is managed by [mise](https://mise.jdx.dev/) (`.mise.toml` pins `go 1.27.1`).
+
+- `go.mod` `go` directive = **1.24** — the minimum required by our deps:
+  `aws-sdk-go-v2` and `neo4j-go-driver/v6` (both declare Go 1.24 minimums).
+- `toolchain` directive = **go1.27.1** — the build version: a Go-release-policy
+  *maintained* version (AWS SDK v2 only supports maintained toolchains; Go 1.24 is
+  EOL as of late 2026 and must not be used to build).
+
+After `git pull` / fresh clone: `mise install && mise trust` then `eval "$(mise activate bash)"`
+(or add that line to your shell rc) so `go`, `go build`, etc. resolve to the pinned toolchain.
+Then `go mod tidy && go build ./...`. that enumerates AWS resources and emits a versioned **JSON-lines** snapshot
 (`(node, edge)` records). Current scope: **EC2 + VPC + Security Groups** in one or more regions,
 single account. This proves enumeration correctness before we build Neo4j + dashboard on top.
 
 ## Quickstart (LocalStack — free, no AWS bill)
 
 ```sh
-cp .env.example .env            # optional: dummy creds for the session
+eval "$(mise activate bash)"    # put go on PATH (add to ~/.bashrc)
+cp .env.example .env
 export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 

@@ -36,9 +36,9 @@ func emitVpc(a acc, vpc types.Vpc, emit *Emitter) {
 	n.Tags = tagsToMap(vpc.Tags)
 	n.Name = tagValue(n.Tags, "Name")
 	n.Properties = map[string]any{
-		"cidr_block":     aws.ToString(vpc.CidrBlock),
-		"default_vpc":    vpc.IsDefault,
-		"dhcp_options":   aws.ToString(vpc.DhcpOptionsId),
+		"cidr_block":   aws.ToString(vpc.CidrBlock),
+		"default_vpc":  vpc.IsDefault,
+		"dhcp_options": aws.ToString(vpc.DhcpOptionsId),
 	}
 	emit.Send(n)
 }
