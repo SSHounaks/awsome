@@ -1,4 +1,5 @@
 # snapshots/artifacts
+.localstack/
 snapshots/
 *.jsonl
 # env/secrets

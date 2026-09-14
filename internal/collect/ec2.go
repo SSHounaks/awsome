@@ -1,0 +1,81 @@
+package collect
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+)
+
+func collectInstances(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
+	sdk, err := sdkConfig(ctx, cfg, a.region)
+	if err != nil {
+		return err
+	}
+	client := ec2.NewFromConfig(sdk)
+	paginator := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("%s DescribeInstances: %w", a.region, err)
+		}
+		for _, res := range page.Reservations {
+			for _, inst := range res.Instances {
+				emitInstance(a, inst, emit)
+			}
+		}
+	}
+	return nil
+}
+
+func emitInstance(a acc, inst types.Instance, emit *Emitter) {
+	id := aws.ToString(inst.InstanceId)
+	n := a.now()
+	n.Label = "EC2"
+	n.Key = a.ec2Arn("instance/" + id)
+	n.Type = string(inst.InstanceType)
+	n.Tags = tagsToMap(inst.Tags)
+	n.Properties = map[string]any{
+		"instance_type": string(inst.InstanceType),
+		"image_id":      aws.ToString(inst.ImageId),
+		"key_name":      aws.ToString(inst.KeyName),
+		"vpc_id":        aws.ToString(inst.VpcId),
+		"subnet_id":     aws.ToString(inst.SubnetId),
+		"public_ip":     aws.ToString(inst.PublicIpAddress),
+		"private_ip":    aws.ToString(inst.PrivateIpAddress),
+	}
+	if inst.State != nil && inst.State.Name != "" {
+		n.Properties["state"] = string(inst.State.Name)
+	}
+	if inst.IamInstanceProfile != nil {
+		n.Properties["iam_instance_profile_arn"] = aws.ToString(inst.IamInstanceProfile.Arn)
+	}
+	n.Name = tagValue(n.Tags, "Name")
+	emit.Send(n)
+
+	if vpc := aws.ToString(inst.VpcId); vpc != "" {
+		emit.Send(a.edge(n.Key, a.ec2Arn("vpc/"+vpc), "IN_VPC"))
+	}
+	if subnet := aws.ToString(inst.SubnetId); subnet != "" {
+		emit.Send(a.edge(n.Key, a.ec2Arn("subnet/"+subnet), "IN_SUBNET"))
+	}
+	for _, g := range inst.SecurityGroups {
+		if gid := aws.ToString(g.GroupId); gid != "" {
+			emit.Send(a.edge(n.Key, a.ec2Arn("security-group/"+gid), "ASSOC_WITH"))
+		}
+	}
+	for _, eni := range inst.NetworkInterfaces {
+		if eniID := aws.ToString(eni.NetworkInterfaceId); eniID != "" {
+			emit.Send(a.edge(n.Key, a.ec2Arn("network-interface/"+eniID), "ATTACHES"))
+		}
+	}
+}
+
+func tagValue(tags map[string]string, key string) string {
+	if tags == nil {
+		return ""
+	}
+	return tags[key]
+}
