@@ -45,8 +45,9 @@ and security review, *without* anyone manually assembling them.
 | D11 | Control-plane/observability | **Future scope** (VPC endpoints/CloudTrail/CloudWatch) |
 | D12 | Scan execution | **Long-running scanner daemon w/ jobs**: live progress, graceful **cancel + resume** (D32) |
 | D32 | Long-running tasks | Scanner is a persistent daemon + control plane; **Deno triggers jobs, streams progress (SSE→WS), cancels/resumes** |
+| D33 | Snapshot consistency | No cross-service transaction exists → snapshot = **loose acquisition window**. Steps ordered stable→runtime; per-node `scanned_at`; resume reuses `snapshot_id`; diff is snapshot-granular |
 | D13 | Drift | Diff snapshots; **show drift in the frontend**; email/Slack alerts later |
-| D14 | History | **Keep last N** snapshots (default 30), pruned after |
+| D14 | History | **Keep last 10** snapshots, pruned after |
 | D15 | Tags | Capture always. **Missing tags / cross-environment edges = findings**, not hard requirements |
 | D16 | IaC | Terraform exists → **declared-vs-actual reconciliation** is future scope |
 | D17 | Misconfig engine | **Own Cypher rules** + **ingest AWS Config findings when present** (accounts without Config work too) |
@@ -113,6 +114,9 @@ pipeline, modern stdlib, single-binary runtime. React Flow (`@xyflow/react`) run
   Multi-account is thus cheap at scan time (a config list) and free at query time (Cypher on `account_id`).
 - **Credentials:** IAM Identity Center (SSO) profile via the SDK default chain. Multi-account = a list of
   `{sso_profile, role_arn}` targets; the scanner assumes each role per target and scans with its creds.
+  **`AmazonReadOnlyAccess` is sufficient** for every scanner action (all `Describe*`/`List*`, S3
+  `GetBucketAcl`/`GetBucketPolicy`, IAM reads). A scoped custom policy is stricter but higher-maintenance —
+  adopt only if the scanner becomes an always-on prod daemon.
 - **Regions:** autodetect enabled regions with `ec2:DescribeRegions` (one cheap global call), scan all of
   them, and drop empty ones from the map. Config allows an explicit region allow-list override.
 - **Partition support:** `partition` and region set derive from the SSO/STS session. GovCloud runs the same
@@ -255,6 +259,17 @@ GET  /jobs/:id/events (SSE) — throttled progress events (batched ~250 ms)
 - Daemon restart → `running` jobs become `interrupted`, resumable from the last completed step.
 - Configurable job timeout (default 60 min) → auto-fail with partial state left resumable.
 
+### Snapshot consistency & ordering
+No atomic cross-service snapshot exists in AWS, so staleness is **measured and minimized**, not claimed away:
+- **Step ordering:** stable config first (IAM, S3, VPCs, SGs, NACLs, route tables) → runtime state last
+  (EC2 states, ASG counts, LB target health), so fast-changing data is freshest at finalize.
+- Every node carries its own `scanned_at`; a snapshot is presented as a **loose acquisition window**
+  `[job_started → finalized]`, surfaced in the UI.
+- **Resume** keeps the same `snapshot_id` (one coherent map); completed steps older than a configurable
+  TTL are re-validated before reuse.
+- **Diffing runs snapshot-granular** — within-snapshot skew never produces false drift.
+- Future: detail view can **live re-verify** a single resource on fetch instead of trusting snapshot data.
+
 ### Progress events (SSE → bridged by Deno to browser WebSocket)
 `job.started · step.started(account,region,service) · step.progress(counts) ·
 step.done(summary) · batch.written(nodes,edges) · job.finalized(snapshot_id) ·
@@ -371,6 +386,7 @@ docker-compose.yml
   [ai      (Phase 2, python service; talks Bolt + Bedrock)]
 ```
 Single-user localhost (D26): `docker compose up`, open http://localhost:PORT, click "Scan now".
+- Neo4j auth from `compose/.env` (user/password), manual rotation; snapshot retention N (=10) is a config knob.
 
 ---
 
@@ -393,10 +409,14 @@ Single-user localhost (D26): `docker compose up`, open http://localhost:PORT, cl
 
 ---
 
-## 15. Remaining open questions
+## 15. Decisions log — full resolution
 
-1. Exact SSO multi-account target format for Phase 1.5 (role-per-account list vs single SSO permission-set).
-2. Snapshot retention N — default 30; make it a config knob.
-3. Neo4j credentials management for the local compose env (env file), rotation policy.
-4. Cancel/resume UX depth: cancel-only in Phase 1, resume in 1.5? (spec assumes both from Phase 1).
-4. Whether Phase 0 should already include EKS/ECS clusters (usage skews the collector's priority order).
+All previously open questions are resolved:
+
+- **Multi-account targets:** role-per-account list `{sso_profile, role_arn}`, scoped by `AmazonReadOnlyAccess`.
+- **Snapshot retention:** N = 10 (config knob).
+- **Neo4j credentials:** `compose/.env` with manual rotation.
+- **Phase 0 scope:** EC2 + VPC + SG bootstrap only; EKS/ECS join at Phase 1.
+- **Resume UX:** both cancel and resume ship in Phase 1 (resume re-validates completed steps > TTL).
+- **Live re-verify:** deferred — detail view trusts the last snapshot for now.
+- **Drift granularity:** snapshot-to-snapshot comparison (per resource key), not node-window-keyed.
