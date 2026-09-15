@@ -53,6 +53,84 @@ export function loadFindings(snapshotId?: string): Finding[] {
   }
 }
 
+const SEVERITY_ORDER: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+
+export function sortFindings(items: Finding[]): Finding[] {
+  return [...items].sort((a, b) => {
+    const d = (SEVERITY_ORDER[b.severity] ?? 0) - (SEVERITY_ORDER[a.severity] ?? 0);
+    if (d !== 0) return d;
+    if (a.rule !== b.rule) return a.rule < b.rule ? -1 : 1;
+    return a.resource_key < b.resource_key ? -1 : 1;
+  });
+}
+
+// Excel and Sheets treat a leading =, +, - or @ as a formula, so a crafted tag or
+// bucket name in an exported cell could execute on open. Prefix those with a
+// quote, then apply normal CSV quoting.
+function csvCell(value: unknown): string {
+  let s = value === null || value === undefined ? "" : String(value);
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+const CSV_COLUMNS: (keyof Finding)[] = [
+  "severity",
+  "rule",
+  "category",
+  "resource_label",
+  "resource_name",
+  "resource_key",
+  "region",
+  "account_id",
+  "message",
+  "remediation",
+  "snapshot_id",
+];
+
+export function exportFindings(items: Finding[], fmt: "json" | "csv" | "md"): string {
+  const sorted = sortFindings(items);
+
+  if (fmt === "json") return JSON.stringify(sorted, null, 2);
+
+  if (fmt === "csv") {
+    const rows = [CSV_COLUMNS.join(",")];
+    for (const f of sorted) rows.push(CSV_COLUMNS.map((c) => csvCell(f[c])).join(","));
+    return rows.join("\n") + "\n";
+  }
+
+  const counts = findingsCounts(sorted);
+  const snap = sorted[0]?.snapshot_id ?? latestSnapshot() ?? "unknown";
+  const out: string[] = [
+    `# AWSome findings — ${snap}`,
+    "",
+    `**${counts.total}** findings` +
+      (Object.keys(counts.bySeverity).length
+        ? " — " +
+          Object.entries(counts.bySeverity)
+            .sort((a, b) => (SEVERITY_ORDER[b[0]] ?? 0) - (SEVERITY_ORDER[a[0]] ?? 0))
+            .map(([s, n]) => `${n} ${s}`)
+            .join(", ")
+        : ""),
+    "",
+  ];
+
+  let severity = "";
+  for (const f of sorted) {
+    if (f.severity !== severity) {
+      if (severity) out.push("");
+      severity = f.severity;
+      out.push(`## ${severity}`, "");
+    }
+    const name = f.resource_name || f.resource_key;
+    out.push(`- **${f.rule}** — ${name} \`${f.region}\``);
+    out.push(`  - ${f.message}`);
+    if (f.remediation) out.push(`  - _remediation:_ ${f.remediation}`);
+    out.push(`  - \`${f.resource_key}\``);
+  }
+  out.push("");
+  return out.join("\n");
+}
+
 export function findingsCounts(findings: Finding[]) {
   const bySeverity: Record<string, number> = {};
   const byCategory: Record<string, number> = {};
