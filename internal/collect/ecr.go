@@ -37,8 +37,12 @@ func emitRepository(a acc, r types.Repository, emit *Emitter) {
 		"image_tag_mutability": string(r.ImageTagMutability),
 		"repo_name":            aws.ToString(r.RepositoryName),
 	}
+	n.Name = aws.ToString(r.RepositoryName)
 	if r.EncryptionConfiguration != nil {
 		n.Properties["encryption_type"] = string(r.EncryptionConfiguration.EncryptionType)
+	}
+	if r.ImageScanningConfiguration != nil {
+		n.Properties["scan_on_push"] = r.ImageScanningConfiguration.ScanOnPush
 	}
 	if r.CreatedAt != nil {
 		n.Properties["created"] = r.CreatedAt.String()

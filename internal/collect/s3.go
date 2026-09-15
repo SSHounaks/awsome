@@ -89,6 +89,12 @@ func collectBuckets(ctx context.Context, cfg Config, a acc, emit *Emitter) error
 			extra["ignore_public_acls"] = aws.ToBool(c.IgnorePublicAcls)
 			extra["restrict_public_buckets"] = aws.ToBool(c.RestrictPublicBuckets)
 		}
+		if lg, err := client.GetBucketLogging(ctx, &s3.GetBucketLoggingInput{Bucket: aws.String(name)}); err == nil {
+			extra["access_logging"] = lg.LoggingEnabled != nil
+			if lg.LoggingEnabled != nil {
+				extra["log_target_bucket"] = aws.ToString(lg.LoggingEnabled.TargetBucket)
+			}
+		}
 		if enc, err := client.GetBucketEncryption(ctx, &s3.GetBucketEncryptionInput{Bucket: aws.String(name)}); err == nil &&
 			enc.ServerSideEncryptionConfiguration != nil {
 			for _, r := range enc.ServerSideEncryptionConfiguration.Rules {
