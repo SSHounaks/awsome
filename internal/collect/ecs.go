@@ -69,6 +69,7 @@ func emitEcsCluster(a acc, cluster types.Cluster, emit *Emitter) {
 	n := a.now()
 	n.Label = "ECSCLUSTER"
 	n.Key = aws.ToString(cluster.ClusterArn)
+	n.Name = aws.ToString(cluster.ClusterName)
 	n.Properties = map[string]any{
 		"status":                         aws.ToString(cluster.Status),
 		"registered_container_instances": cluster.RegisteredContainerInstancesCount,

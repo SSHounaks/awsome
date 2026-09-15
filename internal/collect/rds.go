@@ -33,6 +33,7 @@ func emitRdsInstance(a acc, inst types.DBInstance, emit *Emitter) {
 	n := a.now()
 	n.Label = "RDS"
 	n.Key = fmt.Sprintf("arn:%s:rds:%s:%s:db:%s", a.partition, a.region, a.accountID, id)
+	n.Name = id
 	n.Properties = map[string]any{
 		"engine":              aws.ToString(inst.Engine),
 		"engine_version":      aws.ToString(inst.EngineVersion),
@@ -120,6 +121,7 @@ func emitRdsSubnetGroup(a acc, sg types.DBSubnetGroup, emit *Emitter) {
 	n := a.now()
 	n.Label = "DBSG"
 	n.Key = fmt.Sprintf("arn:%s:rds:%s:%s:subgrp:%s", a.partition, a.region, a.accountID, name)
+	n.Name = name
 	n.Properties = map[string]any{
 		"vpc_id":      aws.ToString(sg.VpcId),
 		"status":      aws.ToString(sg.SubnetGroupStatus),

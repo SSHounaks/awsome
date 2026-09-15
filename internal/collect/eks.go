@@ -34,6 +34,7 @@ func emitEksCluster(a acc, cluster *types.Cluster, emit *Emitter) {
 	n := a.now()
 	n.Label = "EKS"
 	n.Key = arn
+	n.Name = aws.ToString(cluster.Name)
 	n.Properties = map[string]any{
 		"status":           string(cluster.Status),
 		"version":          aws.ToString(cluster.Version),
