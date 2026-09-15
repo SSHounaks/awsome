@@ -243,7 +243,279 @@ const AwsNode = React.memo(function AwsNode({ data }) {
   );
 });
 
-const NODE_TYPES = { aws: AwsNode };
+/* ---------- architecture view: nested container nodes ----------
+ * React Flow renders containment through parentId + relative child positions,
+ * which is what an AWS architecture diagram is: a VPC rectangle holding subnet
+ * rectangles holding resources.
+ */
+function GroupBox({ data }) {
+  return h("div", {
+    className: "h-full w-full rounded-xl",
+    style: {
+      background: data.fill,
+      border: `${data.borderWidth ?? 1.5}px ${data.borderStyle ?? "solid"} ${data.stroke}`,
+      boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.02)",
+    },
+  },
+    // Handles so an edge pointing at a container (e.g. FLOWS_ON -> VPC) still
+    // has somewhere to attach.
+    h(Handle, { type: "target", position: Position.Left, style: { opacity: 0, width: 1, height: 1 } }),
+    h("div", { className: "flex items-center gap-2 px-3 pt-2" },
+      data.icon ? h(data.icon, { width: 18, height: 18, style: { flexShrink: 0 } }) : null,
+      h("div", { className: "min-w-0" },
+        h("div", { className: "truncate font-mono text-[11px] font-semibold", style: { color: data.stroke } },
+          data.title),
+        data.subtitle
+          ? h("div", { className: "truncate font-mono text-[9.5px] text-slate-500" }, data.subtitle)
+          : null,
+      ),
+    ),
+    h(Handle, { type: "source", position: Position.Right, style: { opacity: 0, width: 1, height: 1 } }),
+  );
+}
+
+const NODE_TYPES = { aws: AwsNode, group: GroupBox };
+
+/* layout geometry */
+const A_NODE_W = 172, A_NODE_H = 54, A_GAP = 14;
+const A_SUB_PADX = 14, A_SUB_HEAD = 36, A_SUB_PADB = 14, A_SUB_COLS = 3;
+const A_VPC_PADX = 20, A_VPC_HEAD = 46, A_VPC_PADB = 20, A_VPC_MAXW = 1240;
+const A_LANE_COLS = 6;
+
+// Labels that describe topology. IAM (220+ nodes here) and ENIs (one per
+// attachment) are not drawn on an architecture diagram — they would bury the
+// thing the diagram is for.
+const ARCH_EXCLUDE = new Set(["IAMROLE", "IAMPOLICY", "IAMPROFILE", "IAMUSER", "ACCOUNT", "ENI", "AMI"]);
+// Regional/global services live outside the VPC boundary.
+const ARCH_GLOBAL = new Set(["S3BUCKET", "DYNAMODBTABLE", "ECRREPOSITORY"]);
+
+function gridSize(n, cols, w, h, gap) {
+  const c = Math.max(1, Math.min(cols, n));
+  const r = Math.max(1, Math.ceil(n / c));
+  return { cols: c, rows: r, w: c * w + (c - 1) * gap, h: r * h + (r - 1) * gap };
+}
+
+// layoutArchitecture turns the flat graph into nested VPC > subnet > resource
+// boxes. Containment comes from vpc_id/subnet_id properties, falling back to
+// IN_VPC / IN_SUBNET edges for resources that only express it as an edge
+// (Lambda, for instance, carries no subnet_id property).
+function layoutArchitecture(graph, opts) {
+  const { overlayByKey, region } = opts;
+  // Containment is resolved over every node, then filtered for drawing. An
+  // Elastic IP reaches its subnet through an ENI, and ENIs are not drawn — so
+  // excluding them before resolution would strand the EIP outside the VPC.
+  const allNodes = graph.nodes;
+  const nodes = allNodes.filter((n) => !ARCH_EXCLUDE.has(n.label));
+  const byId = new Map(allNodes.map((n) => [n.id, n]));
+  const prop = (n, k) => (n.properties ?? {})[k];
+
+  const vpcs = nodes.filter((n) => n.label === "VPC");
+  const subnets = nodes.filter((n) => n.label === "SUBNET");
+
+  // Resolve short ids (vpc-abc, subnet-abc) to the ARN keys used as node ids.
+  const vpcKeyByShort = new Map(vpcs.map((v) => [v.id.split("/").pop(), v.id]));
+  const subKeyByShort = new Map(subnets.map((s) => [s.id.split("/").pop(), s.id]));
+
+  const subnetOf = new Map(), vpcOf = new Map();
+  for (const n of allNodes) {
+    const s = prop(n, "subnet_id"), v = prop(n, "vpc_id");
+    if (s && subKeyByShort.has(s)) subnetOf.set(n.id, subKeyByShort.get(s));
+    if (v && vpcKeyByShort.has(v)) vpcOf.set(n.id, vpcKeyByShort.get(v));
+  }
+  for (const e of graph.edges) {
+    if (!byId.has(e.from)) continue;
+    if (e.type === "IN_SUBNET" && byId.has(e.to) && !subnetOf.has(e.from)) subnetOf.set(e.from, e.to);
+    if ((e.type === "IN_VPC" || e.type === "PART_OF") && byId.has(e.to) && !vpcOf.has(e.from)) vpcOf.set(e.from, e.to);
+  }
+  // An auto-scaling group names its subnets rather than its VPC.
+  for (const n of allNodes) {
+    if (vpcOf.has(n.id)) continue;
+    const zones = prop(n, "vpc_zone_identifiers");
+    const first = (Array.isArray(zones) ? zones : String(zones ?? "").split(","))
+      .map((s) => s.trim()).filter(Boolean)[0];
+    if (first && subKeyByShort.has(first)) subnetOf.set(n.id, subKeyByShort.get(first));
+  }
+
+  // Several resources express containment only through an attachment: an
+  // internet gateway is ATTACHED_TO its VPC, a flow log FLOWS_ON one, a volume
+  // is ATTACHED_TO an instance, an ElastiCache node ASSOC_WITH a security group.
+  // Inherit placement across those rather than special-casing each label —
+  // otherwise the internet gateway floats outside the VPC it belongs to.
+  const ATTACH = new Set(["ATTACHED_TO", "ASSOC_WITH", "FLOWS_ON", "PART_OF", "CONTAINS", "USES_SUBGRP"]);
+  const outgoing = new Map();
+  for (const e of graph.edges) {
+    if (!ATTACH.has(e.type)) continue;
+    if (!outgoing.has(e.from)) outgoing.set(e.from, []);
+    outgoing.get(e.from).push(e);
+  }
+  // Two passes so volume -> instance -> subnet -> vpc resolves.
+  for (let pass = 0; pass < 3; pass++) {
+    for (const n of allNodes) {
+      if (subnetOf.has(n.id) && vpcOf.has(n.id)) continue;
+      for (const e of outgoing.get(n.id) ?? []) {
+        // Only a direct attachment implies sharing the target's subnet; being
+        // associated with a security group says nothing about placement.
+        if (!subnetOf.has(n.id) && e.type === "ATTACHED_TO" && subnetOf.has(e.to)) {
+          subnetOf.set(n.id, subnetOf.get(e.to));
+        }
+        if (!vpcOf.has(n.id)) {
+          if (byId.get(e.to)?.label === "VPC") vpcOf.set(n.id, e.to);
+          else if (vpcOf.has(e.to)) vpcOf.set(n.id, vpcOf.get(e.to));
+        }
+      }
+    }
+  }
+
+  // A resource in a subnet is in that subnet's VPC.
+  for (const [id, sub] of subnetOf) {
+    if (!vpcOf.has(id)) {
+      const parentVpc = vpcOf.get(sub) ?? (byId.get(sub) && vpcKeyByShort.get(prop(byId.get(sub), "vpc_id")));
+      if (parentVpc) vpcOf.set(id, parentVpc);
+    }
+  }
+
+  const isContainer = (n) => n.label === "VPC" || n.label === "SUBNET";
+  const members = nodes.filter((n) => !isContainer(n));
+
+  const inSubnet = new Map(subnets.map((s) => [s.id, []]));
+  const inVpcOnly = new Map(vpcs.map((v) => [v.id, []]));
+  const global = [];
+  for (const m of members) {
+    const s = subnetOf.get(m.id), v = vpcOf.get(m.id);
+    if (s && inSubnet.has(s) && !ARCH_GLOBAL.has(m.label)) inSubnet.get(s).push(m);
+    else if (v && inVpcOnly.has(v) && !ARCH_GLOBAL.has(m.label)) inVpcOnly.get(v).push(m);
+    else global.push(m);
+  }
+
+  const out = [];
+  const leaf = (n, parentId, x, y) => {
+    const ov = overlayByKey?.get(n.id);
+    out.push({
+      id: n.id, type: "aws", parentId, extent: parentId ? "parent" : undefined,
+      position: { x, y },
+      data: {
+        name: n.name || n.id.split("/").pop(), label: n.label,
+        marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
+        resourceLabel: n.label, icon: iconFor(n.label, n.properties),
+        accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
+        emphasised: Boolean(ov),
+        title: `${n.name || ""}\n${n.label}\n${n.id}`,
+      },
+    });
+  };
+
+  // --- size each subnet from its contents, then pack subnets into their VPC ---
+  const subSize = new Map();
+  for (const s of subnets) {
+    const g = gridSize(inSubnet.get(s.id).length, A_SUB_COLS, A_NODE_W, A_NODE_H, A_GAP);
+    subSize.set(s.id, { w: g.w + 2 * A_SUB_PADX, h: A_SUB_HEAD + g.h + A_SUB_PADB, g });
+  }
+
+  let cursorY = 0;
+  const vpcBoxes = [];
+  for (const v of vpcs) {
+    const mine = subnets
+      .filter((s) => (vpcOf.get(s.id) ?? vpcKeyByShort.get(prop(s, "vpc_id"))) === v.id)
+      .sort((a, b) => String(prop(a, "az")).localeCompare(String(prop(b, "az"))));
+
+    // pack subnet boxes into rows
+    const placed = [];
+    let rowX = 0, rowY = 0, rowH = 0, innerW = 0;
+    for (const s of mine) {
+      const sz = subSize.get(s.id);
+      if (rowX > 0 && rowX + sz.w > A_VPC_MAXW) { rowX = 0; rowY += rowH + A_GAP; rowH = 0; }
+      placed.push({ s, x: rowX, y: rowY, sz });
+      rowX += sz.w + A_GAP;
+      rowH = Math.max(rowH, sz.h);
+      innerW = Math.max(innerW, rowX - A_GAP);
+    }
+    let innerH = mine.length ? rowY + rowH : 0;
+
+    // VPC-level resources (no subnet): IGW, route tables, NACLs, SGs, LBs
+    const loose = inVpcOnly.get(v.id) ?? [];
+    let looseTop = 0;
+    if (loose.length) {
+      looseTop = innerH ? innerH + A_GAP : 0;
+      const g = gridSize(loose.length, Math.max(A_SUB_COLS, Math.floor(A_VPC_MAXW / (A_NODE_W + A_GAP))), A_NODE_W, A_NODE_H, A_GAP);
+      innerW = Math.max(innerW, g.w);
+      innerH = looseTop + g.h;
+    }
+
+    const box = {
+      id: v.id,
+      w: Math.max(innerW, 320) + 2 * A_VPC_PADX,
+      h: A_VPC_HEAD + Math.max(innerH, A_NODE_H) + A_VPC_PADB,
+      x: 0, y: cursorY,
+    };
+    vpcBoxes.push(box);
+    cursorY += box.h + 28;
+
+    out.push({
+      id: v.id, type: "group", position: { x: box.x, y: box.y },
+      style: { width: box.w, height: box.h },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `VPC  ${v.name || v.id.split("/").pop()}`,
+        subtitle: [prop(v, "cidr_block"), prop(v, "default_vpc") ? "default VPC" : null].filter(Boolean).join("   ·   "),
+        fill: "rgba(99,102,241,0.05)", stroke: "#6366f1", icon: IconVpc,
+      },
+    });
+
+    for (const p of placed) {
+      const isPublic = prop(p.s, "map_public_ip");
+      out.push({
+        id: p.s.id, type: "group", parentId: v.id, extent: "parent",
+        position: { x: A_VPC_PADX + p.x, y: A_VPC_HEAD + p.y },
+        style: { width: p.sz.w, height: p.sz.h },
+        selectable: false, draggable: false, zIndex: 1,
+        data: {
+          title: p.s.name || p.s.id.split("/").pop(),
+          subtitle: [isPublic ? "public" : "private", prop(p.s, "az"), prop(p.s, "cidr_block")].filter(Boolean).join("   ·   "),
+          fill: isPublic ? "rgba(34,197,94,0.06)" : "rgba(56,189,248,0.05)",
+          stroke: isPublic ? "#22c55e" : "#38bdf8",
+          borderStyle: isPublic ? "solid" : "dashed",
+          icon: isPublic ? IconPublicSubnet : IconPrivateSubnet,
+        },
+      });
+      inSubnet.get(p.s.id).forEach((m, i) => {
+        const col = i % p.sz.g.cols, row = Math.floor(i / p.sz.g.cols);
+        leaf(m, p.s.id, A_SUB_PADX + col * (A_NODE_W + A_GAP), A_SUB_HEAD + row * (A_NODE_H + A_GAP));
+      });
+    }
+
+    const looseCols = Math.max(A_SUB_COLS, Math.floor(A_VPC_MAXW / (A_NODE_W + A_GAP)));
+    loose.forEach((m, i) => {
+      const col = i % looseCols, row = Math.floor(i / looseCols);
+      leaf(m, v.id, A_VPC_PADX + col * (A_NODE_W + A_GAP), A_VPC_HEAD + looseTop + row * (A_NODE_H + A_GAP));
+    });
+  }
+
+  // --- regional / global services, outside any VPC ---
+  if (global.length) {
+    const g = gridSize(global.length, A_LANE_COLS, A_NODE_W, A_NODE_H, A_GAP);
+    const box = { w: g.w + 2 * A_VPC_PADX, h: A_VPC_HEAD + g.h + A_VPC_PADB, x: 0, y: cursorY };
+    out.push({
+      id: "__region_lane__", type: "group", position: { x: box.x, y: box.y },
+      style: { width: box.w, height: box.h },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `Regional & global services`,
+        subtitle: region ? `${region}   ·   outside the VPC boundary` : "outside the VPC boundary",
+        fill: "rgba(148,163,184,0.04)", stroke: "#64748b", borderStyle: "dashed",
+      },
+    });
+    global.forEach((m, i) => {
+      const col = i % g.cols, row = Math.floor(i / g.cols);
+      leaf(m, "__region_lane__", A_VPC_PADX + col * (A_NODE_W + A_GAP), A_VPC_HEAD + row * (A_NODE_H + A_GAP));
+    });
+  }
+
+  return out;
+}
+
+// Containment is drawn as nesting in the architecture view, so those edges would
+// just be noise on top of it.
+const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS"]);
 
 function layoutGraph(nodes, edges) {
   const g = new dagre.graphlib.Graph();
@@ -258,7 +530,7 @@ function layoutGraph(nodes, edges) {
   });
 }
 
-function Diagram({ graph, findingsGraph, diffOverlay }) {
+function Diagram({ graph, findingsGraph, diffOverlay, view, region }) {
   if (!graph) {
     return h("div", { className: "flex h-full items-center justify-center text-sm text-slate-500" },
       h("div", { className: "h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-sky-400" }));
@@ -312,12 +584,38 @@ function Diagram({ graph, findingsGraph, diffOverlay }) {
   const allNodes = useMemo(() => [...dagreNodes, ...findNodes], [dagreNodes, findNodes]);
   const allEdges = useMemo(() => [...dagreEdges, ...findEdges], [dagreEdges, findEdges]);
   const layoutedNodes = useMemo(() => layoutGraph(allNodes, allEdges), [allNodes, allEdges]);
+
+  const archNodes = useMemo(
+    () => (view === "arch" ? layoutArchitecture(graph, { overlayByKey, region }) : []),
+    [view, graph, overlayByKey, region],
+  );
+  const archEdges = useMemo(() => {
+    if (view !== "arch") return [];
+    const drawn = new Set(archNodes.map((n) => n.id));
+    return graph.edges
+      .filter((e) => !ARCH_HIDDEN_EDGES.has(e.type) && drawn.has(e.from) && drawn.has(e.to))
+      .map((e) => ({
+        id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
+        animated: e.type === "REFERENCES",
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
+        style: e.type === "REFERENCES"
+          ? { stroke: "#f97316", strokeDasharray: "5 5", strokeWidth: 1.2 }
+          : { stroke: "#475569", strokeWidth: 1.2 },
+        labelStyle: { fontSize: 0 }, zIndex: 5,
+      }));
+  }, [view, graph, archNodes]);
+
+  const isArch = view === "arch";
   return h(ReactFlowProvider, null,
-    h(FlowCanvas, { nodes: layoutedNodes, edges: allEdges, overlayByKey, COLORS }),
+    h(FlowCanvas, {
+      nodes: isArch ? archNodes : layoutedNodes,
+      edges: isArch ? archEdges : allEdges,
+      overlayByKey, COLORS, viewKey: view,
+    }),
   );
 }
 
-function FlowCanvas({ nodes, edges, overlayByKey, COLORS }) {
+function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey }) {
   const { fitView } = useReactFlow();
   useEffect(() => {
     if (!nodes.length) return;
@@ -331,7 +629,7 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS }) {
     };
     const id = requestAnimationFrame(attempt);
     return () => { stopped = true; cancelAnimationFrame(id); };
-  }, [nodes.length, edges.length]);
+  }, [nodes.length, edges.length, viewKey]);
   return h("div", { className: "h-full w-full" },
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
@@ -1351,6 +1649,9 @@ function App() {
   const [jobs, setJobs] = useState(null);
   const [wsOk, setWsOk] = useState(false);
   const [showFindings, setShowFindings] = useState(false);
+  // Architecture is the default: the containment view is what people mean by
+  // "the diagram". Flow stays available for dependency tracing.
+  const [diagView, setDiagView] = useState("arch");
   const [findingGraph, setFindingGraph] = useState(null);
   const [snaps, setSnaps] = useState([]);
   const [showDiffOv, setShowDiffOv] = useState(false);
@@ -1569,6 +1870,18 @@ function App() {
         pane("diagram",
           h("div", { className: "flex h-full min-h-0 flex-col" },
             h("div", { className: "flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2" },
+              h("div", { className: "flex items-center gap-1 rounded-lg border border-white/10 p-0.5" },
+                ["arch", "flow"].map((v) =>
+                  h("button", {
+                    key: v,
+                    className: cx("toggle border-0", diagView === v ? "toggle-on" : "toggle-off"),
+                    onClick: () => setDiagView(v),
+                    title: v === "arch"
+                      ? "AWS architecture view — VPC and subnet boundaries, resources nested inside"
+                      : "Flow view — dependency graph, laid out left to right",
+                  }, v === "arch" ? "architecture" : "flow")
+                ),
+              ),
               h("button", { className: cx("toggle", showFindings ? "toggle-on" : "toggle-off"), onClick: toggleFindings },
                 h(Icon, { name: "alert", className: "h-3.5 w-3.5" }), "findings"),
               h("button", { className: cx("toggle", showDiffOv ? "toggle-on" : "toggle-off"), onClick: toggleDiffOv },
@@ -1593,7 +1906,13 @@ function App() {
                 : null,
             ),
             h("div", { className: "min-h-0 flex-1" },
-              h(Diagram, { graph, findingsGraph: showFindings ? findingGraph : null, diffOverlay: showDiffOv ? diffOv : null })),
+              h(Diagram, {
+                graph,
+                findingsGraph: showFindings ? findingGraph : null,
+                diffOverlay: showDiffOv ? diffOv : null,
+                view: diagView,
+                region: (summary?.regions ?? [])[0],
+              })),
           ),
         ),
         pane("findings", h(Findings, { data: findings, sev: findingSev, setSev: setFindingSev, onAsk: askAbout })),
