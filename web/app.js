@@ -283,11 +283,11 @@ function GroupBox({ data }) {
 const NODE_TYPES = { aws: AwsNode, group: GroupBox };
 
 /* layout geometry */
-const A_NODE_W = 208, A_NODE_H = 54, A_GAP = 12;
-const A_SUB_PADX = 12, A_SUB_HEAD = 58, A_SUB_PADB = 12, A_SUB_COLS = 2;
-const A_AZ_PADX = 12, A_AZ_HEAD = 44, A_AZ_PADB = 12;
-const A_VPC_PADX = 18, A_VPC_HEAD = 60, A_VPC_PADB = 18;
-const A_LANE_COLS = 8;
+const A_NODE_W = 208, A_NODE_H = 54, A_GAP = 14;
+const A_SUB_PADX = 20, A_SUB_HEAD = 58, A_SUB_PADB = 20, A_SUB_COLS = 2;
+const A_AZ_PADX = 18, A_AZ_HEAD = 44, A_AZ_PADB = 18;
+const A_VPC_PADX = 24, A_VPC_HEAD = 60, A_VPC_PADB = 24;
+const A_LANE_PADX = 20, A_LANE_HEAD = 46, A_LANE_PADB = 20, A_LANE_COLS = 8;
 
 // An architecture diagram shows workloads and boundaries. Security groups,
 // route tables, NACLs, target groups, EIPs and volumes are configuration
@@ -530,28 +530,85 @@ function layoutArchitecture(graph, opts) {
     });
   }
 
-  // --- regional / global services, outside any VPC ---
+  // --- regional / global services, grouped by service so like sits with like ---
   if (global.length) {
-    const g = gridSize(global.length, A_LANE_COLS, A_NODE_W, A_NODE_H, A_GAP);
-    const box = { w: g.w + 2 * A_VPC_PADX, h: A_VPC_HEAD + g.h + A_VPC_PADB, x: 0, y: cursorY };
+    const byLabel = new Map();
+    for (const m of global) {
+      if (!byLabel.has(m.label)) byLabel.set(m.label, []);
+      byLabel.get(m.label).push(m);
+    }
+    // Biggest groups first, so the lane reads densest-to-sparsest.
+    const buckets = [...byLabel.entries()]
+      .map(([label, items]) => {
+        const g = gridSize(items.length, A_LANE_COLS, A_NODE_W, A_NODE_H, A_GAP);
+        return { label, items, g, w: g.w + 2 * A_SUB_PADX, h: A_SUB_HEAD + g.h + A_SUB_PADB };
+      })
+      .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label));
+
+    // Pack the service groups into rows. Stacking them vertically made the lane
+    // so tall that fitView zoomed out past readability, with four single-row
+    // groups each claiming a full row of their own.
+    const LANE_MAXW = 1560;
+    let lx = 0, ly = 0, rowH = 0, innerW = 0;
+    for (const b of buckets) {
+      if (lx > 0 && lx + b.w > LANE_MAXW) { lx = 0; ly += rowH + A_GAP; rowH = 0; }
+      b.x = lx; b.y = ly;
+      lx += b.w + A_GAP;
+      rowH = Math.max(rowH, b.h);
+      innerW = Math.max(innerW, lx - A_GAP);
+    }
+    const innerH = ly + rowH;
+    const box = { w: innerW + 2 * A_LANE_PADX, h: A_LANE_HEAD + innerH + A_LANE_PADB, x: 0, y: cursorY };
+
     out.push({
       id: "__region_lane__", type: "group", position: { x: box.x, y: box.y },
       style: { width: box.w, height: box.h },
       selectable: false, draggable: false, zIndex: 0,
       data: {
-        title: `Regional & global services`,
+        title: "Regional & global services",
         subtitle: region ? `${region}   ·   outside the VPC boundary` : "outside the VPC boundary",
         fill: "rgba(148,163,184,0.04)", stroke: "#64748b", borderStyle: "dashed",
       },
     });
-    global.forEach((m, i) => {
-      const col = i % g.cols, row = Math.floor(i / g.cols);
-      leaf(m, "__region_lane__", A_VPC_PADX + col * (A_NODE_W + A_GAP), A_VPC_HEAD + row * (A_NODE_H + A_GAP));
-    });
+
+    for (const b of buckets) {
+      const gid = `__lane__${b.label}`;
+      out.push({
+        id: gid, type: "group", parentId: "__region_lane__", extent: "parent",
+        position: { x: A_LANE_PADX + b.x, y: A_LANE_HEAD + b.y },
+        style: { width: b.w, height: b.h },
+        selectable: false, draggable: false, zIndex: 1,
+        data: {
+          title: LANE_TITLES[b.label] ?? b.label,
+          subtitle: `${b.items.length}`,
+          fill: "rgba(148,163,184,0.04)", stroke: COLORS[b.label] ?? "#64748b",
+          borderStyle: "solid", borderWidth: 1,
+          icon: iconFor(b.label, null),
+        },
+      });
+      b.items.forEach((m, i) => {
+        const c = i % b.g.cols, r = Math.floor(i / b.g.cols);
+        leaf(m, gid, A_SUB_PADX + c * (A_NODE_W + A_GAP), A_SUB_HEAD + r * (A_NODE_H + A_GAP));
+      });
+    }
   }
 
   return out;
 }
+
+const LANE_TITLES = {
+  S3BUCKET: "S3 buckets",
+  ECRREPOSITORY: "ECR repositories",
+  DYNAMODBTABLE: "DynamoDB tables",
+  LAMBDA: "Lambda functions (no VPC)",
+  ECSCLUSTER: "ECS clusters",
+  EKS: "EKS clusters",
+  ASG: "Auto Scaling groups",
+  IGW: "Internet gateways (detached)",
+  VOLUME: "EBS volumes (unattached)",
+  RDS: "RDS instances",
+  ELASTICACHE: "ElastiCache clusters",
+};
 
 // Containment is drawn as nesting in the architecture view, so those edges would
 // just be noise on top of it.
@@ -570,7 +627,7 @@ function layoutGraph(nodes, edges) {
   });
 }
 
-function Diagram({ graph, findingsGraph, diffOverlay, view, region }) {
+function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) {
   if (!graph) {
     return h("div", { className: "flex h-full items-center justify-center text-sm text-slate-500" },
       h("div", { className: "h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-sky-400" }));
@@ -635,8 +692,15 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region }) {
   const archEdges = useMemo(() => {
     if (view !== "arch") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
+    // An edge pointing at a container the source already sits inside (an
+    // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
+    // its own border. Nesting already states it.
+    const containers = new Set(
+      graph.nodes.filter((n) => n.label === "VPC" || n.label === "SUBNET").map((n) => n.id),
+    );
     return graph.edges
       .filter((e) => !ARCH_HIDDEN_EDGES.has(e.type) && drawn.has(e.from) && drawn.has(e.to))
+      .filter((e) => !containers.has(e.to) && !containers.has(e.from))
       .map((e) => ({
         id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
         animated: e.type === "REFERENCES",
@@ -649,16 +713,210 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region }) {
   }, [view, graph, archNodes]);
 
   const isArch = view === "arch";
+  const [selected, setSelected] = useState(null);
+  // A node that vanishes between views (or between snapshots) must not leave a
+  // stale panel open.
+  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
+  useEffect(() => { setSelected(null); }, [view]);
+
+  const selectedNode = selected && nodeById.has(selected)
+    ? { ...nodeById.get(selected), icon: iconFor(nodeById.get(selected).label, nodeById.get(selected).properties) }
+    : null;
+
+  const onNodeClick = (_e, n) => {
+    // Containers carry no resource of their own; clicking one should not open a
+    // panel describing a boundary.
+    if (n?.type === "group") { setSelected(null); return; }
+    setSelected(n?.id ?? null);
+  };
+
   return h(ReactFlowProvider, null,
     h(FlowCanvas, {
       nodes: isArch ? archNodes : layoutedNodes,
       edges: isArch ? archEdges : allEdges,
       overlayByKey, COLORS, viewKey: view,
+      onNodeClick,
+      onPaneClick: () => setSelected(null),
+      detail: h(DetailPanel, { node: selectedNode, findings, onClose: () => setSelected(null) }),
+      canExport: isArch,
+      exportTitle: `AWS architecture${region ? ` — ${region}` : ""}`,
+      exportFooter: `${graph.nodes.length} resources · generated by AWSome`,
     }),
   );
 }
 
-function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey }) {
+/* ---------- SVG export ----------
+ * Built from the layout data rather than by scraping the canvas: React Flow
+ * draws nodes as HTML, so there is no SVG to lift. The AWS icon glyphs *are*
+ * inline <svg>, so those are pulled from the DOM by node id and re-embedded,
+ * which keeps the export looking like the diagram instead of like boxes.
+ */
+const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+
+// Monospace at ~0.6em per char; truncate so text cannot spill past its box.
+function fitText(s, px, size) {
+  const max = Math.max(1, Math.floor(px / (size * 0.6)));
+  const str = String(s ?? "");
+  return str.length <= max ? str : str.slice(0, Math.max(1, max - 1)) + "…";
+}
+
+function architectureSvg(nodes, edges, meta) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const absCache = new Map();
+  const abs = (n) => {
+    if (absCache.has(n.id)) return absCache.get(n.id);
+    const p = n.parentId && byId.has(n.parentId) ? abs(byId.get(n.parentId)) : { x: 0, y: 0 };
+    const a = { x: p.x + (n.position?.x ?? 0), y: p.y + (n.position?.y ?? 0) };
+    absCache.set(n.id, a);
+    return a;
+  };
+
+  const sized = nodes.map((n) => {
+    const a = abs(n);
+    const w = n.style?.width ?? A_NODE_W, h = n.style?.height ?? A_NODE_H;
+    return { n, x: a.x, y: a.y, w, h };
+  });
+
+  const PAD = 32;
+  const maxX = Math.max(...sized.map((s) => s.x + s.w), 0);
+  const maxY = Math.max(...sized.map((s) => s.y + s.h), 0);
+  const W = maxX + PAD * 2, H = maxY + PAD * 2 + 34;
+
+  const parts = [];
+  parts.push(`<rect width="${W}" height="${H}" fill="#070b14"/>`);
+  parts.push(
+    `<text x="${PAD}" y="${PAD - 8}" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="15" font-weight="700">${esc(meta.title)}</text>`,
+  );
+
+  // Parents before children so nesting reads correctly.
+  const depth = (n) => (n.parentId && byId.has(n.parentId) ? 1 + depth(byId.get(n.parentId)) : 0);
+  const ordered = [...sized].sort((a, b) =>
+    (a.n.type === "group" ? 0 : 1) - (b.n.type === "group" ? 0 : 1) || depth(a.n) - depth(b.n));
+
+  for (const s of ordered) {
+    const d = s.n.data ?? {};
+    const x = s.x + PAD, y = s.y + PAD;
+    if (s.n.type === "group") {
+      const dash = d.borderStyle === "dashed" ? ' stroke-dasharray="6 4"' : "";
+      parts.push(
+        `<rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="12" fill="${d.fill ?? "none"}" stroke="${d.stroke ?? "#475569"}" stroke-width="${d.borderWidth ?? 1.5}"${dash}/>`,
+      );
+      parts.push(`<circle cx="${x + 16}" cy="${y + 18}" r="3" fill="${d.stroke ?? "#475569"}"/>`);
+      parts.push(
+        `<text x="${x + 26}" y="${y + 22}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600">${esc(fitText(d.title, s.w - 40, 11.5))}</text>`,
+      );
+      if (d.subtitle) {
+        parts.push(
+          `<text x="${x + 26}" y="${y + 36}" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="10">${esc(fitText(d.subtitle, s.w - 40, 10))}</text>`,
+        );
+      }
+      continue;
+    }
+
+    const accent = d.accentColor ?? "#475569";
+    parts.push(
+      `<rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="8" fill="#0d1320" stroke="${accent}" stroke-width="${d.emphasised ? 2 : 1}"/>`,
+    );
+    const icon = meta.iconFor?.(s.n.id);
+    if (icon) parts.push(`<g transform="translate(${x + 12},${y + 12})">${icon}</g>`);
+    else {
+      parts.push(`<rect x="${x + 12}" y="${y + 12}" width="30" height="30" rx="5" fill="${accent}"/>`);
+      parts.push(
+        `<text x="${x + 27}" y="${y + 32}" text-anchor="middle" fill="#0b1220" font-family="ui-monospace,monospace" font-size="12" font-weight="700">${esc((d.label ?? "?").slice(0, 2))}</text>`,
+      );
+    }
+    const tx = x + 52, tw = s.w - 64;
+    parts.push(
+      `<text x="${tx}" y="${y + 25}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5">${esc(fitText((d.marker ?? "") + (d.name ?? ""), tw, 11.5))}</text>`,
+    );
+    parts.push(
+      `<text x="${tx}" y="${y + 39}" fill="#64748b" font-family="ui-monospace,monospace" font-size="9.5">${esc(fitText(d.label, tw, 9.5))}</text>`,
+    );
+  }
+
+  for (const e of edges ?? []) {
+    const a = sized.find((s) => s.n.id === e.source), b = sized.find((s) => s.n.id === e.target);
+    if (!a || !b) continue;
+    parts.push(
+      `<line x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" stroke="#475569" stroke-width="1.2"/>`,
+    );
+  }
+
+  parts.push(
+    `<text x="${PAD}" y="${H - 12}" fill="#475569" font-family="ui-monospace,monospace" font-size="10">${esc(meta.footer)}</text>`,
+  );
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n${parts.join("\n")}\n</svg>\n`;
+}
+
+/* ---------- resource detail panel ----------
+ * Opens on clicking a resource, closes on clicking empty canvas. Containers
+ * (VPC, AZ, subnet, service groups) are not selectable, so only actual
+ * resources can open it.
+ */
+function DetailPanel({ node, findings, onClose }) {
+  if (!node) return null;
+  const props = node.properties ?? {};
+  const keys = Object.keys(props).sort();
+  const mine = (findings ?? []).filter((f) => f.resource_key === node.id);
+
+  const fmt = (v) => {
+    if (v === null || v === undefined || v === "") return "—";
+    if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  };
+
+  return h("div", {
+    className: "absolute right-3 top-3 z-20 flex max-h-[calc(100%-1.5rem)] w-[380px] flex-col rounded-xl border border-white/10 bg-ink-900/95 shadow-2xl backdrop-blur",
+    // clicks inside must not reach the canvas and close the panel
+    onClick: (e) => e.stopPropagation(),
+  },
+    h("div", { className: "flex shrink-0 items-start gap-2.5 border-b border-white/10 px-4 py-3" },
+      node.icon ? h(node.icon, { width: 26, height: 26, style: { flexShrink: 0 } }) : null,
+      h("div", { className: "min-w-0 flex-1" },
+        h("div", { className: "truncate font-mono text-[13px] font-semibold text-slate-100" }, node.name || "—"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-wide text-slate-500" }, node.label),
+      ),
+      h("button", {
+        className: "shrink-0 rounded px-1.5 text-slate-500 hover:text-slate-200",
+        onClick: onClose, title: "close",
+      }, "✕"),
+    ),
+    h("div", { className: "min-h-0 flex-1 overflow-y-auto px-4 py-3" },
+      mine.length
+        ? h("div", { className: "mb-3" },
+            h("div", { className: "kpi-label pb-1.5" }, `findings (${mine.length})`),
+            mine.map((f, i) =>
+              h("div", { key: i, className: "mb-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-2" },
+                h("div", { className: "flex items-center gap-1.5" },
+                  h("span", { className: cx("sevbadge", (SEV[f.severity] ?? SEV.info).badge) }, f.severity),
+                  h("span", { className: "truncate font-mono text-[10.5px] text-slate-400" }, f.rule),
+                  f.suppressed ? h("span", { className: "chip" }, "accepted") : null,
+                ),
+                h("div", { className: "pt-1 text-[11.5px] leading-snug text-slate-300" }, f.message),
+              )
+            ),
+          )
+        : null,
+      h("div", { className: "kpi-label pb-1.5" }, "properties"),
+      keys.length
+        ? h("dl", { className: "space-y-1" },
+            keys.map((k) =>
+              h("div", { key: k, className: "flex gap-2 border-b border-white/5 py-1 last:border-0" },
+                h("dt", { className: "w-[44%] shrink-0 font-mono text-[10.5px] text-slate-500" }, k),
+                h("dd", { className: "min-w-0 flex-1 break-words font-mono text-[10.5px] text-slate-200" }, fmt(props[k])),
+              )
+            ),
+          )
+        : h("div", { className: "text-[11.5px] text-slate-500" }, "no properties collected"),
+      h("div", { className: "kpi-label pb-1.5 pt-3" }, "arn"),
+      h("div", { className: "break-all font-mono text-[10px] text-slate-400" }, node.id),
+    ),
+  );
+}
+
+function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, onPaneClick, detail, canExport, exportTitle, exportFooter }) {
   const { fitView } = useReactFlow();
   useEffect(() => {
     if (!nodes.length) return;
@@ -673,10 +931,41 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey }) {
     const id = requestAnimationFrame(attempt);
     return () => { stopped = true; cancelAnimationFrame(id); };
   }, [nodes.length, edges.length, viewKey]);
-  return h("div", { className: "h-full w-full" },
+  const exportSvg = () => {
+    // Icon glyphs are inline <svg> in each node; lift them so the export keeps
+    // the AWS iconography rather than falling back to lettered chips.
+    const iconFor = (id) => {
+      const el = document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"] svg`);
+      return el ? el.outerHTML : null;
+    };
+    const svg = architectureSvg(nodes, edges, {
+      title: exportTitle ?? "AWS architecture",
+      footer: exportFooter ?? "",
+      iconFor,
+    });
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(exportTitle ?? "architecture").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  return h("div", { className: "relative h-full w-full" },
+    detail,
+    canExport
+      ? h("button", {
+          className: "toggle toggle-off absolute left-3 top-3 z-20",
+          onClick: exportSvg,
+          title: "Download this diagram as a standalone SVG",
+        }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), "SVG")
+      : null,
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
       edgesUpdatable: false, nodeTypes: NODE_TYPES, defaultEdgeOptions: { type: "default" },
+      onNodeClick, onPaneClick,
     },
       h(Background, { color: "#16213a" }),
       h(Controls, { style: { background: "#0d1320", color: "#9ca3af", borderColor: "#2a3550" } }),
@@ -1955,6 +2244,7 @@ function App() {
                 diffOverlay: showDiffOv ? diffOv : null,
                 view: diagView,
                 region: (summary?.regions ?? [])[0],
+                findings: findings?.findings ?? [],
               })),
           ),
         ),
