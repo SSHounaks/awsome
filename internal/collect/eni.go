@@ -43,6 +43,24 @@ func emitNetworkInterface(a acc, eni types.NetworkInterface, emit *Emitter) {
 		"description":       aws.ToString(eni.Description),
 		"source_dest_check": aws.ToBool(eni.SourceDestCheck),
 		"interface_type":    string(eni.InterfaceType),
+		// "available" is AWS's own term for an ENI attached to nothing; every
+		// other status means something owns it (an instance, ELB, Lambda, ...).
+		"status": string(eni.Status),
+	}
+	if o := aws.ToString(eni.RequesterId); o != "" {
+		n.Properties["requester_id"] = o
+	}
+	if eni.RequesterManaged != nil {
+		n.Properties["requester_managed"] = aws.ToBool(eni.RequesterManaged)
+	}
+	if eni.Attachment != nil {
+		if v := aws.ToString(eni.Attachment.InstanceId); v != "" {
+			n.Properties["instance_id"] = v
+		}
+		if v := aws.ToString(eni.Attachment.InstanceOwnerId); v != "" {
+			n.Properties["attachment_owner"] = v
+		}
+		n.Properties["attachment_status"] = string(eni.Attachment.Status)
 	}
 	emit.Send(n)
 
