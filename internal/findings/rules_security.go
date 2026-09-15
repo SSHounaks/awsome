@@ -529,7 +529,7 @@ func ruleEcrHardening(g *Graph) []Finding {
 // from 0.0.0.0/0, so they are graded differently.
 func ruleEksPublicEndpoint(g *Graph) []Finding {
 	var out []Finding
-	for _, n := range g.NodesWithLabel("EKSCLUSTER") {
+	for _, n := range g.NodesWithLabel("EKS") {
 		pub, ok := propBool(n, "endpoint_public_access")
 		if !ok || !pub {
 			continue

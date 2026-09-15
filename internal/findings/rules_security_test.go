@@ -226,13 +226,13 @@ func TestExternalTrustAccounts(t *testing.T) {
 
 func TestRuleEksPublicEndpoint(t *testing.T) {
 	g := graphOf(
-		node("EKSCLUSTER", "c-open", map[string]any{
+		node("EKS", "c-open", map[string]any{
 			"endpoint_public_access": true, "public_access_cidrs": []any{"0.0.0.0/0"},
 		}),
-		node("EKSCLUSTER", "c-scoped", map[string]any{
+		node("EKS", "c-scoped", map[string]any{
 			"endpoint_public_access": true, "public_access_cidrs": []any{"203.0.113.0/24"},
 		}),
-		node("EKSCLUSTER", "c-private", map[string]any{
+		node("EKS", "c-private", map[string]any{
 			"endpoint_public_access": false, "endpoint_private_access": true,
 		}),
 	)
