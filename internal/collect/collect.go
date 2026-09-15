@@ -3,6 +3,8 @@ package collect
 import (
 	"context"
 	"errors"
+	"os"
+	os_user "os/user"
 	"strings"
 	"sync"
 
@@ -10,37 +12,12 @@ import (
 	"awsome/internal/model"
 )
 
-type Processor func(ctx context.Context, cfg Config, a acc, emit *Emitter) error
-
 func Run(ctx context.Context, cfg config.Config, target Target, snapshotID string, emit *Emitter) error {
-	var steps []Processor
-	for _, region := range target.Regions {
-		region := region
-		for _, fn := range []Processor{
-			collectInstances, collectVpcs, collectSecurityGroups,
-			collectSubnets, collectVolumes, collectNetworkInterfaces, collectImages,
-			collectRouteTables, collectNetworkACLs, collectInternetGateways,
-			collectElasticIPs, collectVpcPeering, collectAutoScalingGroups,
-			collectLoadBalancers, collectRdsInstances, collectRdsSubnetGroups,
-			collectCacheClusters, collectRedshiftClusters, collectOpenSearchDomains,
-			collectTables, collectFunctions, collectEcsClusters, collectEksClusters,
-			collectBuckets, collectEcrRepositories,
-		} {
-			fn := fn
-			steps = append(steps, func(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-				a.region = region
-				return fn(ctx, cfg, a, emit)
-			})
-		}
-	}
-	if len(target.Regions) > 0 {
-		globalRegion := target.Regions[0]
-		steps = append(steps, func(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-			a.region = globalRegion
-			return collectIam(ctx, cfg, a, emit)
-		})
-	}
+	steps := Plan(target)
+	return runSteps(ctx, cfg, steps, snapshotID, emit)
+}
 
+func runSteps(ctx context.Context, cfg config.Config, steps []Step, snapshotID string, emit *Emitter) error {
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -56,9 +33,8 @@ func Run(ctx context.Context, cfg config.Config, target Target, snapshotID strin
 			case <-ctx.Done():
 				return
 			}
-			base := acc{accountID: target.AccountID, partition: target.Partition, snapshot: snapshotID}
-			if err := step(ctx, cfg, base, emit); err != nil {
-				if !degradeable(err) {
+			if err := RunStep(ctx, cfg, step, snapshotID, emit); err != nil {
+				if !IsDegrade(err) {
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
@@ -70,7 +46,7 @@ func Run(ctx context.Context, cfg config.Config, target Target, snapshotID strin
 	return errors.Join(errs...)
 }
 
-func degradeable(err error) bool {
+func IsDegrade(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -91,6 +67,7 @@ func degradeable(err error) bool {
 }
 
 func MakeSnapshot(snapshotID, accountID, partition string, regions []string, startedAt string, status string) model.Snapshot {
+	user, host := owner()
 	return model.Snapshot{
 		Kind:       "snapshot",
 		SnapshotID: snapshotID,
@@ -99,6 +76,20 @@ func MakeSnapshot(snapshotID, accountID, partition string, regions []string, sta
 		StartedAt:  startedAt,
 		Status:     status,
 		Regions:    regions,
+		User:       user,
+		Hostname:   host,
 		Statistics: map[string]int{},
 	}
+}
+
+func owner() (string, string) {
+	user := "unknown"
+	if u, err := os_user.Current(); err == nil && u.Username != "" {
+		user = u.Username
+	}
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	return user, host
 }

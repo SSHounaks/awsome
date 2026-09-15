@@ -13,6 +13,7 @@ type Config struct {
 	SnapshotID  string
 	Concurrency int
 	Profile     string
+	ControlAddr string
 }
 
 func Parse(args []string) (Config, error) {
@@ -24,6 +25,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&c.SnapshotID, "snapshot-id", "", "override snapshot id (default: snap-<UTC timestamp>)")
 	fs.IntVar(&c.Concurrency, "concurrency", 4, "max parallel scan steps")
 	fs.StringVar(&c.Profile, "profile", "", "AWS profile to use")
+	fs.StringVar(&c.ControlAddr, "control", "", "serve control plane on this address (empty = one-shot scan)")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}

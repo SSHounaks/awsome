@@ -51,6 +51,12 @@ func main() {
 	fmt.Println("seeding LocalStack with a demo topology...")
 
 	ec2c := ec2.NewFromConfig(sdk)
+	if vpcID, err := findTaggedVPC(ctx, ec2c); err == nil && vpcID != "" {
+		warn("ensure 0.0.0.0/0 ingress fixture (rule 2)", ensureOpenIngress(ctx, ec2c, vpcID))
+		warn("create flow log fixture (rule 9)", createFlowLog(ctx, ec2c, vpcID))
+		fmt.Printf("reused existing demo vpc %s (supplementary fixtures ensured)\n", vpcID)
+		return
+	}
 	iamc := iam.NewFromConfig(sdk)
 	elbc := elasticloadbalancingv2.NewFromConfig(sdk)
 	rdsC := rds.NewFromConfig(sdk)
@@ -92,6 +98,8 @@ func main() {
 	must("run instance", err)
 	fmt.Printf("instance %s\n", instanceID)
 
+	warn("add 0.0.0.0/0 ingress fixture (rule 2)", authorizeSGOpen(ctx, ec2c, sgWeb))
+	warn("create flow log fixture (rule 9)", createFlowLog(ctx, ec2c, vpcID))
 	warn("create+attach volume", createVolume(ctx, ec2c, instanceID, region))
 	warn("create extra eni", createENI(ctx, ec2c, subnetID, sgWeb, region))
 	warn("associate eip", associateEIP(ctx, ec2c, eipID, instanceID))
@@ -584,6 +592,59 @@ func createBuckets(ctx context.Context, c *s3.Client) error {
 
 func createECR(ctx context.Context, c *ecr.Client) error {
 	_, err := c.CreateRepository(ctx, &ecr.CreateRepositoryInput{RepositoryName: aws.String("awsome-demo")})
+	return err
+}
+
+func findTaggedVPC(ctx context.Context, c *ec2.Client) (string, error) {
+	out, err := c.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
+		Filters: []ect.Filter{{Name: aws.String("tag:Name"), Values: []string{"awsome-demo"}}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(out.Vpcs) == 0 {
+		return "", fmt.Errorf("not found")
+	}
+	return aws.ToString(out.Vpcs[0].VpcId), nil
+}
+
+func ensureOpenIngress(ctx context.Context, c *ec2.Client, vpcID string) error {
+	sgs, err := c.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		Filters: []ect.Filter{
+			{Name: aws.String("tag:Name"), Values: []string{"awsome-demo-web"}},
+			{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if len(sgs.SecurityGroups) == 0 {
+		return fmt.Errorf("web sg not found")
+	}
+	return authorizeSGOpen(ctx, c, aws.ToString(sgs.SecurityGroups[0].GroupId))
+}
+
+func authorizeSGOpen(ctx context.Context, c *ec2.Client, sgID string) error {
+	_, err := c.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: aws.String(sgID),
+		IpPermissions: []ect.IpPermission{{
+			IpProtocol: aws.String("tcp"),
+			FromPort:   aws.Int32(80),
+			ToPort:     aws.Int32(80),
+			IpRanges:   []ect.IpRange{{CidrIp: aws.String("0.0.0.0/0")}},
+		}},
+	})
+	return err
+}
+
+func createFlowLog(ctx context.Context, c *ec2.Client, vpcID string) error {
+	_, err := c.CreateFlowLogs(ctx, &ec2.CreateFlowLogsInput{
+		ResourceIds:        []string{vpcID},
+		ResourceType:       ect.FlowLogsResourceTypeVpc,
+		TrafficType:        ect.TrafficTypeAll,
+		LogDestinationType: ect.LogDestinationTypeS3,
+		LogDestination:     aws.String("arn:aws:s3:::awsome-demo-assets"),
+	})
 	return err
 }
 

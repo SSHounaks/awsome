@@ -36,6 +36,10 @@ type Snapshot struct {
 	Status     string         `json:"status"`
 	Regions    []string       `json:"regions"`
 	Statistics map[string]int `json:"statistics"`
+	User       string         `json:"user,omitempty"`
+	Hostname   string         `json:"hostname,omitempty"`
+	Trigger    string         `json:"trigger,omitempty"`
+	JobID      string         `json:"job_id,omitempty"`
 }
 
 func Now() string {

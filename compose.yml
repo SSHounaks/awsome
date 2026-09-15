@@ -10,3 +10,14 @@ services:
     volumes:
       - .localstack:/var/lib/localstack
       - /var/run/docker.sock:/var/run/docker.sock
+
+  neo4j:
+    image: neo4j:5.26-community
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/awsome-dev-pass}
+      NEO4J_server_bolt_advertised__address: 127.0.0.1:7687
+    volumes:
+      - .neo4j:/data

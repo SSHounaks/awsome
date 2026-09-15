@@ -1,10 +1,16 @@
 # snapshots/artifacts
 .localstack/
+.neo4j/
 snapshots/
 *.jsonl
 # env/secrets
 .env
 .env.*
+# build artifacts
+bin/
 # deno/react build
 web/dist/
 web/node_modules/
+
+.tools/
+web/styles.css

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,8 +13,9 @@ import (
 
 	"awsome/internal/collect"
 	"awsome/internal/config"
+	"awsome/internal/control"
 	"awsome/internal/inspect"
-	"awsome/internal/model"
+	"awsome/internal/jobs"
 )
 
 func main() {
@@ -22,13 +24,43 @@ func main() {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(2)
 	}
+	if cfg.ControlAddr != "" {
+		runServe(cfg)
+		return
+	}
+	runOnce(cfg)
+}
 
+func runServe(cfg config.Config) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := os.MkdirAll(cfg.SnapshotDir, 0o755); err != nil {
+		log.Fatalf("mkdir snapshot dir: %v", err)
+	}
+	store, err := jobs.OpenStore(filepath.Join(cfg.SnapshotDir, ".jobs.db"))
+	if err != nil {
+		log.Fatalf("open jobs store: %v", err)
+	}
+	bus := jobs.NewBus()
+	mgr := jobs.NewManager(jobs.CfgFrom(cfg), store, bus)
+	mgr.Restore()
+	mgr.Start()
+	defer mgr.Stop()
+
+	if err := control.New(cfg.ControlAddr, cfg, mgr).ListenAndServe(ctx); err != nil {
+		log.Fatalf("control: %v", err)
+	}
+	log.Println("scanner daemon stopped")
+}
+
+func runOnce(cfg config.Config) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	snapshotID := cfg.SnapshotID
 	if snapshotID == "" {
-		snapshotID = "snap-" + time.Now().UTC().Format("20060102T150405Z")
+		snapshotID = "snap-" + nowStamp()
 	}
 
 	target, err := collect.ResolveTarget(ctx, cfg)
@@ -44,22 +76,23 @@ func main() {
 	}
 
 	emit := collect.NewEmitter(1024)
-	startedAt := model.Now()
+	startedAt := modelNow()
 	status := "completed"
 
 	recordsPath := filepath.Join(dir, "records.jsonl")
 	statsCh := make(chan map[string]int, 1)
-	writeErrCh := make(chan error, 1)
+	werrCh := make(chan error, 1)
 	go func() {
 		stats, werr := inspect.WriteRecords(recordsPath, emit.Chan())
 		statsCh <- stats
-		writeErrCh <- werr
+		werrCh <- werr
 	}()
 
 	runErr := collect.Run(ctx, cfg, target, snapshotID, emit)
 	emit.Close()
+
 	stats := <-statsCh
-	writeErr := <-writeErrCh
+	writeErr := <-werrCh
 
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled) {
 		status = "interrupted"
@@ -68,7 +101,8 @@ func main() {
 	}
 
 	snapshot := collect.MakeSnapshot(snapshotID, target.AccountID, target.Partition, target.Regions, startedAt, status)
-	snapshot.FinishedAt = model.Now()
+	snapshot.FinishedAt = modelNow()
+	snapshot.Trigger = "manual"
 	snapshot.Statistics = stats
 	if err := inspect.WriteJSON(filepath.Join(dir, "summary.json"), snapshot); err != nil {
 		fmt.Fprintln(os.Stderr, "summary:", err)
@@ -86,10 +120,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "write records:", writeErr)
 		os.Exit(1)
 	}
-	var exitErr error
 	if runErr != nil {
 		fmt.Fprintln(os.Stderr, "collection errors:")
-		exitErr = runErr
 		if list, ok := runErr.(interface{ Unwrap() []error }); ok {
 			for _, e := range list.Unwrap() {
 				fmt.Fprintln(os.Stderr, "  -", e)
@@ -97,8 +129,15 @@ func main() {
 		} else {
 			fmt.Fprintln(os.Stderr, "  -", runErr)
 		}
-	}
-	if exitErr != nil {
 		os.Exit(1)
 	}
+}
+
+func nowStamp() string {
+	t := time.Now().UTC().Format("20060102T150405Z")
+	return t
+}
+
+func modelNow() string {
+	return time.Now().UTC().Format("20060102T150405Z")
 }

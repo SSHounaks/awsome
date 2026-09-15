@@ -1,11 +1,17 @@
 package collect
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+
+	"awsome/internal/model"
+)
 
 type Emitter struct {
-	mu  sync.Mutex
-	ch  chan any
-	one sync.Once
+	ch    chan any
+	one   sync.Once
+	nodes atomic.Int64
+	edges atomic.Int64
 }
 
 func NewEmitter(buf int) *Emitter {
@@ -13,9 +19,17 @@ func NewEmitter(buf int) *Emitter {
 }
 
 func (e *Emitter) Send(r any) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	switch r.(type) {
+	case model.Node:
+		e.nodes.Add(1)
+	case model.Edge:
+		e.edges.Add(1)
+	}
 	e.ch <- r
+}
+
+func (e *Emitter) Counts() (nodes, edges int64) {
+	return e.nodes.Load(), e.edges.Load()
 }
 
 func (e *Emitter) Close() {

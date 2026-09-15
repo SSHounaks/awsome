@@ -46,6 +46,8 @@ and security review, *without* anyone manually assembling them.
 | D12 | Scan execution | **Long-running scanner daemon w/ jobs**: live progress, graceful **cancel + resume** (D32) |
 | D32 | Long-running tasks | Scanner is a persistent daemon + control plane; **Deno triggers jobs, streams progress (SSE→WS), cancels/resumes** |
 | D33 | Snapshot consistency | No cross-service transaction exists → snapshot = **loose acquisition window**. Steps ordered stable→runtime; per-node `scanned_at`; resume reuses `snapshot_id`; diff is snapshot-granular |
+| D34 | Chat providers | Provider via `AWSOME_CHAT_PROVIDER`. `heuristic` = always-available offline QA; `bedrock` = Bedrock Claude; `openrouter` = OpenAI-compatible router; `opencode` = **delegate to local opencode agent** (read-only session, no tools). Any remote provider degrades to heuristic with a notice |
+| D35 | Diff viewer + attribution | Snapshot diff = **Bitbucket-style unified viewer** (add/remove/change color-coded, per-resource line diffs, drill-down, Markdown/JSON export, Diagram drift overlay). "Who changed it" = the **AWS principal** that mutated the resource/parameter, correlated from **CloudTrail** (`trail.jsonl`) over the from→to window; snapshot-level runner identity (user/hostname/trigger/job) recorded in `summary.json`. LocalStack has no `LookupEvents` → step degrades, demo snapshots ship sample trail data |
 | D13 | Drift | Diff snapshots; **show drift in the frontend**; email/Slack alerts later |
 | D14 | History | **Keep last 10** snapshots, pruned after |
 | D15 | Tags | Capture always. **Missing tags / cross-environment edges = findings**, not hard requirements |
