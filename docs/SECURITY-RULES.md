@@ -254,7 +254,53 @@ gitignored.
 
 ## Coverage gaps
 
-Services with no walker at all, so nothing in this catalogue can fire for them:
-CloudFront, Route 53, WAF, API Gateway, ACM, SNS, SQS, Step Functions, EFS,
-Secrets Manager, SSM Parameter Store, Organizations/SCPs, Systems Manager patch
-state, VPC endpoints (their ENIs are seen, the endpoints themselves are not).
+Services with no walker, so nothing in this catalogue can fire for them. Ordered
+by evidence of actual use rather than by guesswork — counts come from the
+infrastructure-as-code that provisions the estate, the AWS SDK clients the
+applications depend on, and the services appearing in CloudTrail mutation events.
+
+### Tier 1 — heavily used, security-relevant
+
+| service | evidence | what a walker would catch |
+| --- | --- | --- |
+| **SSM Parameter Store** | the single most-provisioned resource type; 15 repos depend on the SDK client | `String` where `SecureString` was meant (plaintext secret), over-broad `ssm:GetParameter*` grants, missing KMS CMK. This is where connection strings and API secrets actually live. |
+| **CloudWatch Logs** | ~34 log groups; the second most active service in CloudTrail mutations | no retention set (evidence loss, or unbounded cost), no KMS encryption, over-long retention |
+| **CloudWatch alarms / EventBridge rules** | ~86 alarms, ~29 rules | whether detection and alerting exist at all — currently invisible to the scanner |
+| **SQS** | ~14 queues, 4 repos | queue policy allowing `*`, no SSE, no dead-letter queue |
+| **KMS** | keys, aliases and grants; appears in CloudTrail | **key rotation disabled (CIS 3.8)**, over-permissive key policy |
+| **Secrets Manager** | secrets + versions | rotation disabled, resource policy allowing `*` |
+
+### Tier 2 — the edge, where the internet actually meets the estate
+
+| service | evidence | what a walker would catch |
+| --- | --- | --- |
+| **CloudFront** | ~9 distributions, plus OAI/OAC and functions | no WAF association, weak minimum TLS, access logging off, origin reachable directly |
+| **WAFv2** | web ACLs + regex pattern sets | whether the ACL is actually *associated* with the ALB/CloudFront — an unattached WAF protects nothing |
+| **API Gateway** | methods, integrations, resources | methods with `authorization = NONE`, no throttling, no request validation |
+| **Route 53** | zone + ~14 records | records pointing at released resources — dangling DNS is the subdomain-takeover path |
+| **ACM** | ~7 certificates | expiry, validation state |
+| **VPC endpoints** | endpoints, endpoint services, allowed principals | endpoint policies allowing `*`; also *which VPC they are in* (see the interface endpoints sitting in a default VPC) |
+| **IAM OIDC provider** | GitHub Actions federation | over-broad `sub` trust conditions — a misscoped `repo:*` lets any repository assume the deploy role |
+
+### Tier 3 — depth on services already walked
+
+Covered at the top level only; the security-relevant detail is one API call deeper:
+
+- **ECS task definitions and services** (~26 / ~9) — only clusters are collected today.
+  Privileged containers, secrets in `environment` instead of `secrets`, and the task
+  role all live here.
+- **ALB listeners and rules** (~24 / ~16) — protocol and port are collected; TLS policy,
+  access logs, and WAF association are not.
+- **ECR repository policies** — scan-on-push is now checked, the policy is not (public pull).
+- **S3 notifications, lifecycle and CORS** — CORS in particular is security-relevant.
+- **Lambda event source mappings, permissions, function URLs.**
+- **RDS Proxy, parameter groups, cluster parameter groups.**
+- **CloudTrail's own configuration** — events are read, but never whether the trail is
+  multi-region, validated, or encrypted.
+- **EBS encryption-by-default**, SNS topics, SES, DLM lifecycle policies,
+  Application Auto Scaling, default SG / default NACL.
+
+Still entirely absent from both the estate and this list: GuardDuty, AWS Config,
+Security Hub, Access Analyzer, Inspector, Macie, Organizations/SCPs — which is
+itself the finding. Nothing currently reports whether managed threat detection is
+switched on.
