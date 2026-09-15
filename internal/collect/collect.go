@@ -33,8 +33,10 @@ func runSteps(ctx context.Context, cfg config.Config, steps []Step, snapshotID s
 			case <-ctx.Done():
 				return
 			}
-			if err := RunStep(ctx, cfg, step, snapshotID, emit); err != nil {
-				if !IsDegrade(err) {
+			err := RunStep(ctx, cfg, step, snapshotID, emit)
+			emit.Send(coverageFor(step, snapshotID, err))
+			if err != nil {
+				if _, degraded := DegradeReason(err); !degraded {
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
@@ -46,24 +48,67 @@ func runSteps(ctx context.Context, cfg config.Config, steps []Step, snapshotID s
 	return errors.Join(errs...)
 }
 
-func IsDegrade(err error) bool {
+// degradeMarkers are substrings that mean "this service can't answer here" —
+// unimplemented (LocalStack), not available in this partition/region, or denied
+// by the caller's policy. None of these invalidate the rest of the scan.
+var degradeMarkers = []string{
+	"not yet implemented",
+	"NotImplemented",
+	"InvalidAction",
+	"OptInRequired",
+	"AccessDenied",
+	"UnauthorizedOperation",
+	"InvalidClientTokenId",
+	"UnrecognizedClientException",
+	"EndpointConnectionError",
+	"no such host",
+}
+
+// DegradeReason reports whether err is a tolerable "service unavailable to us"
+// failure, and which marker matched so the snapshot can say why.
+func DegradeReason(err error) (string, bool) {
 	if err == nil {
-		return false
+		return "", false
 	}
 	msg := err.Error()
-	for _, s := range []string{
-		"not yet implemented",
-		"NotImplemented",
-		"InvalidAction",
-		"OptInRequired",
-		"AccessDenied",
-		"UnauthorizedOperation",
-	} {
+	for _, s := range degradeMarkers {
 		if strings.Contains(msg, s) {
-			return true
+			return s, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func IsDegrade(err error) bool {
+	_, ok := DegradeReason(err)
+	return ok
+}
+
+func coverageFor(step Step, snapshotID string, err error) model.Coverage {
+	c := model.Coverage{
+		Kind:       "coverage",
+		Service:    step.Service,
+		Region:     step.Region,
+		Status:     "ok",
+		SnapshotID: snapshotID,
+		ScannedAt:  model.Now(),
+	}
+	if err != nil {
+		c.Status = "failed"
+		c.Error = truncate(err.Error(), 400)
+		if reason, degraded := DegradeReason(err); degraded {
+			c.Status = "degraded"
+			c.Reason = reason
+		}
+	}
+	return c
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func MakeSnapshot(snapshotID, accountID, partition string, regions []string, startedAt string, status string) model.Snapshot {

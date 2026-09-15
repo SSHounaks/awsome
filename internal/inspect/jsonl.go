@@ -31,6 +31,11 @@ func WriteRecords(path string, ch <-chan any) (map[string]int, error) {
 		case model.Edge:
 			stats["edges"]++
 			stats["edges:"+v.Type]++
+		case model.Coverage:
+			stats["coverage:"+v.Status]++
+			if v.Status != "ok" {
+				stats["coverage:"+v.Status+":"+v.Service]++
+			}
 		}
 	}
 	return stats, nil
