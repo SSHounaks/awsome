@@ -1,9 +1,79 @@
 import React, { useState, useEffect, useMemo, useRef, Fragment } from "react";
 import { createRoot } from "react-dom/client";
-import { ReactFlow, ReactFlowProvider, useReactFlow, Background, Controls, MiniMap, MarkerType } from "@xyflow/react";
+import { ReactFlow, ReactFlowProvider, useReactFlow, Background, Controls, MiniMap, MarkerType, Handle, Position } from "@xyflow/react";
 import dagre from "dagre";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+
+/* ---------- official AWS Architecture Icons ----------
+ * @aws-icons/react (MIT) packages AWS's published Architecture Icon set as React
+ * components. Pinned to react@18.3.1 via ?deps so esm.sh does not pull a second
+ * React copy (that would break hooks). Each import is a separate module, so only
+ * the icons listed here are fetched — not all 700+.
+ */
+import IconEc2 from "@aws-icons/react/architecture-service/amazon-ec2";
+import IconS3 from "@aws-icons/react/architecture-service/amazon-simple-storage-service";
+import IconRds from "@aws-icons/react/architecture-service/amazon-rds";
+import IconLambda from "@aws-icons/react/architecture-service/aws-lambda";
+import IconDynamo from "@aws-icons/react/architecture-service/amazon-dynamo-db";
+import IconElastiCache from "@aws-icons/react/architecture-service/amazon-elasti-cache";
+import IconEcs from "@aws-icons/react/architecture-service/amazon-elastic-container-service";
+import IconEks from "@aws-icons/react/architecture-service/amazon-elastic-kubernetes-service";
+import IconEcr from "@aws-icons/react/architecture-service/amazon-elastic-container-registry";
+import IconElb from "@aws-icons/react/architecture-service/elastic-load-balancing";
+import IconIam from "@aws-icons/react/architecture-service/aws-identity-and-access-management";
+import IconEbs from "@aws-icons/react/architecture-service/amazon-elastic-block-store";
+import IconRedshift from "@aws-icons/react/architecture-service/amazon-redshift";
+import IconEni from "@aws-icons/react/resource/amazon-vpc-elastic-network-interface";
+import IconFlowLogs from "@aws-icons/react/resource/amazon-vpc-flow-logs";
+import IconIgw from "@aws-icons/react/resource/amazon-vpc-internet-gateway";
+import IconNacl from "@aws-icons/react/resource/amazon-vpc-network-access-control-list";
+import IconEip from "@aws-icons/react/resource/amazon-ec2-elastic-ip-address";
+import IconAmi from "@aws-icons/react/resource/amazon-ec2-ami";
+import IconPeering from "@aws-icons/react/resource/amazon-vpc-peering-connection";
+import IconRouteTable from "@aws-icons/react/resource/amazon-route-53-route-table";
+import IconVpc from "@aws-icons/react/architecture-group/virtual-private-cloud-vpc";
+import IconPublicSubnet from "@aws-icons/react/architecture-group/public-subnet";
+import IconPrivateSubnet from "@aws-icons/react/architecture-group/private-subnet";
+import IconAsg from "@aws-icons/react/architecture-group/auto-scaling-group";
+
+// Node label -> icon. Labels with no published AWS icon (e.g. security groups,
+// RDS subnet groups) fall back to the initial-letter chip in AwsNode.
+const AWS_ICON = {
+  EC2: IconEc2,
+  S3BUCKET: IconS3,
+  RDS: IconRds,
+  LAMBDA: IconLambda,
+  DYNAMODBTABLE: IconDynamo,
+  ELASTICACHE: IconElastiCache,
+  ECSCLUSTER: IconEcs,
+  EKSCLUSTER: IconEks,
+  ECRREPOSITORY: IconEcr,
+  LB: IconElb,
+  TARGETGROUP: IconElb,
+  IAMROLE: IconIam,
+  IAMPOLICY: IconIam,
+  IAMPROFILE: IconIam,
+  VOLUME: IconEbs,
+  REDSHIFT: IconRedshift,
+  ENI: IconEni,
+  FLOWLOG: IconFlowLogs,
+  IGW: IconIgw,
+  NACL: IconNacl,
+  EIP: IconEip,
+  AMI: IconAmi,
+  VPCPEERING: IconPeering,
+  ROUTETABLE: IconRouteTable,
+  VPC: IconVpc,
+  ASG: IconAsg,
+};
+
+// A subnet's icon depends on whether it is public, which the graph payload tells
+// us via properties.map_public_ip.
+function iconFor(label, properties) {
+  if (label === "SUBNET") return properties?.map_public_ip ? IconPublicSubnet : IconPrivateSubnet;
+  return AWS_ICON[label] ?? null;
+}
 
 const h = React.createElement;
 
@@ -140,11 +210,46 @@ const COLORS = {
 };
 const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", low: "#64748b" };
 
+/* ---------- custom React Flow node with an AWS icon ----------
+ * React Flow's built-in "default" node only renders a text label, so an icon
+ * needs a custom node type. Custom nodes must declare their own Handles or
+ * edges have nowhere to attach.
+ */
+const AwsNode = React.memo(function AwsNode({ data }) {
+  const Icon = data.icon;
+  return h("div", {
+    className: "flex items-center gap-2.5 rounded-lg border px-3 py-2 shadow-lg",
+    style: {
+      background: "#0d1320",
+      borderColor: data.accentColor ?? "#475569",
+      borderWidth: data.emphasised ? 2 : 1,
+      minWidth: 188,
+    },
+    title: data.title,
+  },
+    h(Handle, { type: "target", position: Position.Left, style: { opacity: 0, width: 1, height: 1 } }),
+    Icon
+      ? h(Icon, { width: 30, height: 30, style: { flexShrink: 0 } })
+      : h("div", {
+          className: "flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded font-mono text-[13px] font-bold",
+          style: { background: data.accentColor ?? "#334155", color: "#0b1220" },
+        }, (data.label ?? "?").slice(0, 2)),
+    h("div", { className: "min-w-0 leading-tight" },
+      h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100", style: { maxWidth: 150 } },
+        (data.marker ?? "") + (data.name ?? "")),
+      h("div", { className: "font-mono text-[9.5px] uppercase tracking-wide text-slate-500" }, data.label),
+    ),
+    h(Handle, { type: "source", position: Position.Right, style: { opacity: 0, width: 1, height: 1 } }),
+  );
+});
+
+const NODE_TYPES = { aws: AwsNode };
+
 function layoutGraph(nodes, edges) {
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
   g.setGraph({ rankdir: "LR", nodesep: 60, ranksep: 240 });
-  nodes.forEach((n) => g.setNode(n.id, { width: 200, height: 52 }));
+  nodes.forEach((n) => g.setNode(n.id, { width: 210, height: 56 }));
   edges.forEach((e) => g.setEdge(e.source, e.target));
   dagre.layout(g);
   return nodes.map((n) => {
@@ -177,13 +282,21 @@ function Diagram({ graph, findingsGraph, diffOverlay }) {
   const dagreNodes = useMemo(() =>
     graph.nodes.map((n) => {
       const ov = overlayByKey.get(n.id);
-      const base = { background: COLORS[n.label] ?? "#1e293b", color: "#fff", border: "1px solid #475569", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontFamily: "monospace", whiteSpace: "pre-line" };
-      const style = ov ? { ...base, border: `2px solid ${ov === "add" ? "#4ade80" : "#fbbf24"}`, background: ov === "add" ? "#14532d" : base.background } : base;
+      const name = n.name || n.id.split("/").pop();
       const marker = ov === "add" ? "+ " : ov === "mod" ? "~ " : "";
       return {
-        id: n.id, type: "default",
-        data: { label: `${marker}${n.name || n.id.split("/").pop()}\n[${n.label}]`, resourceLabel: n.label },
-        style,
+        id: n.id, type: "aws",
+        data: {
+          name,
+          label: n.label,
+          marker,
+          resourceLabel: n.label,
+          icon: iconFor(n.label, n.properties),
+          // drift overlay keeps its green/amber emphasis
+          accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
+          emphasised: Boolean(ov),
+          title: `${name}\n${n.label}\n${n.id}`,
+        },
       };
     }),
   [graph, overlayByKey]);
@@ -222,7 +335,7 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS }) {
   return h("div", { className: "h-full w-full" },
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
-      edgesUpdatable: false, nodeTypes: {}, defaultEdgeOptions: { type: "default" },
+      edgesUpdatable: false, nodeTypes: NODE_TYPES, defaultEdgeOptions: { type: "default" },
     },
       h(Background, { color: "#16213a" }),
       h(Controls, { style: { background: "#0d1320", color: "#9ca3af", borderColor: "#2a3550" } }),
@@ -493,6 +606,15 @@ function Findings({ data, sev, setSev, onAsk }) {
 
   const sevChips = SEV_ORDER.filter((s) => counts[s] > 0);
 
+  const exportUrl = (fmt) => {
+    const p = new URLSearchParams({ format: fmt });
+    if (sev) p.set("severity", sev);
+    if (cat !== "all") p.set("category", cat);
+    if (q.trim()) p.set("q", q.trim());
+    if (data?.snapshot) p.set("snapshot", data.snapshot);
+    return `/api/findings/export?${p}`;
+  };
+
   return h("div", { className: "flex h-full flex-col" },
     h("div", { className: "shrink-0 border-b border-white/10 px-6 py-3" },
       h("div", { className: "flex flex-wrap items-center gap-2" },
@@ -519,6 +641,19 @@ function Findings({ data, sev, setSev, onAsk }) {
           h("option", { value: "sev" }, "severity"),
           h("option", { value: "rule" }, "rule"),
           h("option", { value: "resource" }, "resource"),
+        ),
+        // Export mirrors the active filters, so you get exactly the rows on screen.
+        h("div", { className: "ml-auto flex items-center gap-1" },
+          h("span", { className: "text-[11px] text-slate-500" }, "export"),
+          ["csv", "md", "json"].map((fmt) =>
+            h("a", {
+              key: fmt,
+              className: "toggle toggle-off",
+              href: exportUrl(fmt),
+              download: "",
+              title: `Download ${visible.length} finding(s) as ${fmt.toUpperCase()}`,
+            }, fmt)
+          ),
         ),
       ),
       h("div", { className: "mt-2 text-[11.5px] text-slate-500" },
@@ -606,11 +741,21 @@ function fmtDur(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function Scans({ jobs, connected, run, act }) {
-  const [regions, setRegions] = useState("us-east-1");
+function Scans({ jobs, connected, run, act, scannedRegions }) {
+  // Default to the regions the latest snapshot actually covered. Hardcoding
+  // "us-east-1" produces a broken scan in any non-commercial partition
+  // (GovCloud, China), where that region does not exist.
+  const [regions, setRegions] = useState(scannedRegions || "us-east-1");
+  const [pinned, setPinned] = useState(false);
+  useEffect(() => {
+    if (!pinned && scannedRegions) setRegions(scannedRegions);
+  }, [scannedRegions, pinned]);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const list = jobs ?? [];
+  // /api/jobs can answer with an error object (e.g. the scan daemon is not
+  // running), so never assume this is an array — .find() on an object took the
+  // whole SPA down.
+  const list = Array.isArray(jobs) ? jobs : [];
   const live = list.find((j) => j.status === "queued" || j.status === "running" || j.status === "cancelling");
   const history = list.filter((j) => !["queued", "running", "cancelling"].includes(j.status));
 
@@ -729,7 +874,7 @@ function Scans({ jobs, connected, run, act }) {
         h("input", {
           className: "input font-mono",
           value: regions,
-          onChange: (e) => setRegions(e.target.value),
+          onChange: (e) => { setPinned(true); setRegions(e.target.value); },
           placeholder: "us-east-1, eu-west-1, ap-south-1…",
         }),
         h("button", { className: "btn-primary w-full justify-center", disabled: busy, onClick: doRun },
@@ -1231,7 +1376,11 @@ function App() {
 
   useEffect(() => {
     fetch("/api/summary").then((r) => r.json()).then(setSummary).catch(console.error);
-    fetch("/api/jobs").then((r) => r.json()).then(setJobs).catch(() => setJobs([]));
+    // An error response still parses as JSON, so .catch() never fires — keep
+    // jobs an array no matter what the endpoint answers.
+    fetch("/api/jobs").then((r) => r.json())
+      .then((d) => setJobs(Array.isArray(d) ? d : []))
+      .catch(() => setJobs([]));
     fetch("/api/findings").then((r) => r.json()).then(setFindings).catch(() => {});
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/events`);
     ws.onopen = () => setWsOk(true);
@@ -1448,7 +1597,7 @@ function App() {
           ),
         ),
         pane("findings", h(Findings, { data: findings, sev: findingSev, setSev: setFindingSev, onAsk: askAbout })),
-        pane("scans", h(Scans, { jobs, connected: wsOk, run, act })),
+        pane("scans", h(Scans, { jobs, connected: wsOk, run, act, scannedRegions: (summary?.regions ?? []).join(",") })),
         pane("ask", h(Ask, {
           log: askLog, busy: askBusy, onSend: askSend,
           provider: askProvider, setProvider: setAskProvider, lastAsst,

@@ -26,6 +26,20 @@ type Edge struct {
 	ScannedAt  string `json:"scanned_at"`
 }
 
+// Coverage records the outcome of a single (service, region) walker so a
+// snapshot is explicit about what it could *not* see. Without this a scan run
+// under a restricted role looks identical to a scan of an empty account.
+type Coverage struct {
+	Kind       string `json:"kind"`
+	Service    string `json:"service"`
+	Region     string `json:"region"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`
+	Error      string `json:"error,omitempty"`
+	SnapshotID string `json:"snapshot_id"`
+	ScannedAt  string `json:"scanned_at"`
+}
+
 type Snapshot struct {
 	Kind       string         `json:"kind"`
 	SnapshotID string         `json:"snapshot_id"`

@@ -7,6 +7,8 @@ var severityRank = map[string]int{"critical": 5, "high": 4, "medium": 3, "low": 
 var ruleOrder = []func(*Graph) []Finding{
 	ruleS3PublicBucket,
 	ruleOpenIngress,
+	ruleIamWildcardAdmin,
+	ruleIamTrustWildcard,
 	ruleCrossEnvEdge,
 	ruleUnencryptedStorage,
 	ruleUnassociatedResources,

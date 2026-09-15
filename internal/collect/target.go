@@ -18,7 +18,17 @@ type Target struct {
 }
 
 func ResolveTarget(ctx context.Context, cfg Config) (Target, error) {
-	sdk, err := sdkConfig(ctx, cfg, "us-east-1")
+	allow, err := cfg.RegionAllowList()
+	if err != nil {
+		return Target{}, err
+	}
+
+	bootstrap, err := bootstrapRegion(ctx, cfg, allow)
+	if err != nil {
+		return Target{}, err
+	}
+
+	sdk, err := sdkConfig(ctx, cfg, bootstrap)
 	if err != nil {
 		return Target{}, fmt.Errorf("sdk config: %w", err)
 	}
@@ -37,11 +47,6 @@ func ResolveTarget(ctx context.Context, cfg Config) (Target, error) {
 		if partition == "" {
 			partition = "aws"
 		}
-	}
-
-	allow, err := cfg.RegionAllowList()
-	if err != nil {
-		return Target{}, err
 	}
 
 	var regions []string
@@ -63,4 +68,24 @@ func ResolveTarget(ctx context.Context, cfg Config) (Target, error) {
 	sort.Strings(regions)
 
 	return Target{AccountID: accountID, Partition: partition, Regions: regions}, nil
+}
+
+// bootstrapRegion picks the region used for the discovery calls that precede
+// region enumeration (STS GetCallerIdentity, EC2 DescribeRegions). It has to be
+// a region that exists in the caller's *partition* — "us-east-1" is unreachable
+// with GovCloud (aws-us-gov) or China (aws-cn) credentials, so prefer an
+// explicit --regions value, then whatever the profile/environment resolves to,
+// and only fall back to the commercial default.
+func bootstrapRegion(ctx context.Context, cfg Config, allow []string) (string, error) {
+	if len(allow) > 0 {
+		return allow[0], nil
+	}
+	sdk, err := sdkConfig(ctx, cfg, "")
+	if err != nil {
+		return "", fmt.Errorf("sdk config: %w", err)
+	}
+	if sdk.Region != "" {
+		return sdk.Region, nil
+	}
+	return "us-east-1", nil
 }

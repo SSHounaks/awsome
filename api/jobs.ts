@@ -27,8 +27,20 @@ export interface Job {
   cfg?: { endpoint_url?: string; snapshot_dir?: string; concurrency?: number; profile?: string };
 }
 
+// The scan daemon (`make serve`) is an optional, separate process. When it is
+// not running, fetch throws ECONNREFUSED — that is a normal state, not a server
+// error, so it is reported as 503 with a useful message instead of bubbling a
+// bare "fetch failed" up as a 500.
 async function control(pathname: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(CONTROL + pathname, init);
+  let res: Response;
+  try {
+    res = await fetch(CONTROL + pathname, init);
+  } catch {
+    return {
+      status: 503,
+      body: { error: `scan daemon unreachable at ${CONTROL} — start it with 'make serve'` },
+    };
+  }
   let body: unknown = null;
   try {
     body = await res.json();

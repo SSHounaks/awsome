@@ -134,6 +134,42 @@ go run ./cmd/awsome-scanner --regions us-east-1,us-west-2
 
 Rules of thumb: no `--endpoint-url` = real AWS; credential chain = SSO/default profile.
 
+### Non-commercial partitions (GovCloud, China)
+
+Partition is derived from the STS caller ARN, so `arn:aws-us-gov:...` keys are emitted
+automatically. The one thing that needs care is the **bootstrap region** used for
+`GetCallerIdentity` / `DescribeRegions` before region enumeration: `us-east-1` does not
+exist in `aws-us-gov` or `aws-cn`, so the scanner takes the first `--regions` value, then
+the profile/environment region, and only then falls back to the commercial default. Pass
+`--regions` explicitly and it always does the right thing:
+
+```sh
+AWS_PROFILE=<gov-profile> go run ./cmd/awsome-scanner --regions us-gov-west-1
+```
+
+### CloudTrail window
+
+`LookupEvents` is throttled to a few TPS and pages 50 at a time, so walking the full 90-day
+retention can take hours on a busy account. The trail step is bounded by default and only
+captures mutations (drift attribution does not need read-only events):
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--trail-lookback` | `168h` | how far back to look; `0` skips the trail step entirely |
+| `--trail-max-events` | `20000` | stop paginating after this many events; `0` = uncapped |
+| `--trail-include-readonly` | `false` | also capture read-only events |
+
+### Scan coverage
+
+Every `(service, region)` walker emits a `{"kind":"coverage"}` record with status
+`ok` / `degraded` / `failed`. A service that is denied by your role, unavailable in the
+partition, or unimplemented is recorded with the reason rather than silently skipped — so a
+restricted scan is distinguishable from an empty account:
+
+```sh
+grep '"kind":"coverage"' snapshots/<snap>/records.jsonl | grep -v '"status":"ok"'
+```
+
 ## Record format (JSON-lines)
 
 ```jsonl

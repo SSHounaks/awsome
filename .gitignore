@@ -3,6 +3,11 @@
 .neo4j/
 snapshots/
 *.jsonl
+# scan-derived writeups describe a real account (IDs, CIDRs, public IPs, open
+# findings) — this repo is public, so keep them out of it
+docs/*-environment-map.md
+docs/*-findings.md
+*.findings.csv
 # env/secrets
 .env
 .env.*
@@ -11,6 +16,7 @@ bin/
 # deno/react build
 web/dist/
 web/node_modules/
+node_modules/
 
 .tools/
 web/styles.css

@@ -79,19 +79,44 @@ func collectBuckets(ctx context.Context, cfg Config, a acc, emit *Emitter) error
 			versioning = string(v.Status)
 		}
 
-		emitBucket(a, name, region, grants, policy, tags, versioning, emit)
+		// Block Public Access overrides ACLs and bucket policies, so a public
+		// grant is only actually reachable when these are off.
+		extra := map[string]any{}
+		if pab, err := client.GetPublicAccessBlock(ctx, &s3.GetPublicAccessBlockInput{Bucket: aws.String(name)}); err == nil && pab.PublicAccessBlockConfiguration != nil {
+			c := pab.PublicAccessBlockConfiguration
+			extra["block_public_acls"] = aws.ToBool(c.BlockPublicAcls)
+			extra["block_public_policy"] = aws.ToBool(c.BlockPublicPolicy)
+			extra["ignore_public_acls"] = aws.ToBool(c.IgnorePublicAcls)
+			extra["restrict_public_buckets"] = aws.ToBool(c.RestrictPublicBuckets)
+		}
+		if enc, err := client.GetBucketEncryption(ctx, &s3.GetBucketEncryptionInput{Bucket: aws.String(name)}); err == nil &&
+			enc.ServerSideEncryptionConfiguration != nil {
+			for _, r := range enc.ServerSideEncryptionConfiguration.Rules {
+				if r.ApplyServerSideEncryptionByDefault != nil {
+					extra["encryption"] = string(r.ApplyServerSideEncryptionByDefault.SSEAlgorithm)
+					break
+				}
+			}
+		}
+
+		emitBucket(a, name, region, grants, policy, tags, versioning, extra, emit)
 	}
 	return nil
 }
 
-func emitBucket(a acc, name, region string, grants []map[string]any, policy string, tags map[string]string, versioning string, emit *Emitter) {
+func emitBucket(a acc, name, region string, grants []map[string]any, policy string, tags map[string]string, versioning string, extra map[string]any, emit *Emitter) {
 	n := a.now()
 	n.Label = "S3BUCKET"
 	n.Key = fmt.Sprintf("arn:%s:s3:::%s", a.partition, name)
 	n.Tags = tags
-	n.Name = tagValue(tags, "Name")
+	// The bucket name is the resource's identity; a "Name" tag is optional and
+	// usually absent, which left findings rendering with a blank subject.
+	n.Name = name
 	n.Properties = map[string]any{
 		"region": region,
+	}
+	for k, v := range extra {
+		n.Properties[k] = v
 	}
 	if len(grants) > 0 {
 		n.Properties["acl_grantees"] = grants

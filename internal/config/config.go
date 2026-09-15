@@ -4,16 +4,20 @@ import (
 	"flag"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	EndpointURL string
-	Regions     string
-	SnapshotDir string
-	SnapshotID  string
-	Concurrency int
-	Profile     string
-	ControlAddr string
+	EndpointURL   string
+	Regions       string
+	SnapshotDir   string
+	SnapshotID    string
+	Concurrency   int
+	Profile       string
+	ControlAddr   string
+	TrailLookback time.Duration
+	TrailMax      int
+	TrailReadOnly bool
 }
 
 func Parse(args []string) (Config, error) {
@@ -26,6 +30,9 @@ func Parse(args []string) (Config, error) {
 	fs.IntVar(&c.Concurrency, "concurrency", 4, "max parallel scan steps")
 	fs.StringVar(&c.Profile, "profile", "", "AWS profile to use")
 	fs.StringVar(&c.ControlAddr, "control", "", "serve control plane on this address (empty = one-shot scan)")
+	fs.DurationVar(&c.TrailLookback, "trail-lookback", 168*time.Hour, "CloudTrail lookback window for drift attribution (0 = skip the trail step)")
+	fs.IntVar(&c.TrailMax, "trail-max-events", 20000, "stop paginating CloudTrail after this many events (0 = no cap)")
+	fs.BoolVar(&c.TrailReadOnly, "trail-include-readonly", false, "also capture read-only CloudTrail events (drift attribution only needs mutations)")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}

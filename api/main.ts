@@ -163,6 +163,51 @@ async function handler(req: Request): Promise<Response> {
     return json({ snapshot: findings.latestSnapshot(), counts: findings.findingsCounts(list), findings: list });
   }
 
+  if (reqPath === "/api/findings/export") {
+    try {
+      const sid = url.searchParams.get("snapshot") ?? undefined;
+      const fmtRaw = (url.searchParams.get("format") ?? "csv").toLowerCase();
+      const fmt = (["json", "csv", "md"].includes(fmtRaw) ? fmtRaw : "csv") as "json" | "csv" | "md";
+
+      // Optional filters so you can export just what you are acting on, e.g.
+      // ?severity=critical,high or ?rule=s3-public-bucket
+      const sevFilter = (url.searchParams.get("severity") ?? "")
+        .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const ruleFilter = (url.searchParams.get("rule") ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const catFilter = (url.searchParams.get("category") ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean);
+      const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+
+      let list = findings.loadFindings(sid);
+      if (sevFilter.length) list = list.filter((f) => sevFilter.includes(f.severity.toLowerCase()));
+      if (ruleFilter.length) list = list.filter((f) => ruleFilter.includes(f.rule));
+      if (catFilter.length) list = list.filter((f) => catFilter.includes(f.category));
+      if (q) {
+        list = list.filter((f) =>
+          (f.rule ?? "").toLowerCase().includes(q) ||
+          (f.message ?? "").toLowerCase().includes(q) ||
+          (f.resource_name ?? "").toLowerCase().includes(q) ||
+          (f.resource_key ?? "").toLowerCase().includes(q)
+        );
+      }
+
+      const body = findings.exportFindings(list, fmt);
+      const mime = fmt === "csv"
+        ? "text/csv; charset=utf-8"
+        : fmt === "md"
+        ? "text/markdown; charset=utf-8"
+        : "application/json";
+      const snap = sid ?? findings.latestSnapshot() ?? "snapshot";
+      const filename = `awsome-findings-${snap}.${fmt}`;
+      return new Response(body, {
+        headers: { "Content-Type": mime, "Content-Disposition": `attachment; filename="${filename}"` },
+      });
+    } catch (err) {
+      return json({ error: String(err instanceof Error ? err.message : err) }, 500);
+    }
+  }
+
   if (reqPath === "/api/graph/findings") {
     return withError(async () => {
       const [nodes, edges] = await Promise.all([queryFindingNodes(cypher), queryAffectsEdges(cypher)]);
