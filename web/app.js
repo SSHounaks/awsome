@@ -47,7 +47,7 @@ const AWS_ICON = {
   DYNAMODBTABLE: IconDynamo,
   ELASTICACHE: IconElastiCache,
   ECSCLUSTER: IconEcs,
-  EKSCLUSTER: IconEks,
+  EKS: IconEks,
   ECRREPOSITORY: IconEcr,
   LB: IconElb,
   TARGETGROUP: IconElb,
@@ -206,7 +206,7 @@ const COLORS = {
   NACL: "#6b7280", RDS: "#b91c1c", REDSHIFT: "#881337", ELASTICACHE: "#9d174d",
   LB: "#ec4899", TARGETGROUP: "#db2777", ASG: "#8b5cf6", DYNAMODBTABLE: "#2563eb",
   IAMPROFILE: "#a16207", IAMPOLICY: "#ca8a04", AMI: "#64748b", OPENSEARCH: "#0ea5e9",
-  ECSCLUSTER: "#059669", EKSCLUSTER: "#0284c7", ECRREPO: "#4f46e5", FLOWLOG: "#71717a",
+  ECSCLUSTER: "#059669", EKS: "#0284c7", ECRREPOSITORY: "#4f46e5", FLOWLOG: "#71717a",
 };
 const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", low: "#64748b" };
 
@@ -263,10 +263,14 @@ function GroupBox({ data }) {
     h("div", { className: "flex items-center gap-2 px-3 pt-2" },
       data.icon ? h(data.icon, { width: 18, height: 18, style: { flexShrink: 0 } }) : null,
       h("div", { className: "min-w-0" },
-        h("div", { className: "truncate font-mono text-[11px] font-semibold", style: { color: data.stroke } },
-          data.title),
+        // Title stays near-white for legibility; the boundary colour carries the
+        // public/private distinction via the border and a small leading dot.
+        h("div", { className: "flex items-center gap-1.5" },
+          h("span", { className: "h-1.5 w-1.5 shrink-0 rounded-full", style: { background: data.stroke } }),
+          h("div", { className: "truncate font-mono text-[11.5px] font-semibold text-slate-100" }, data.title),
+        ),
         data.subtitle
-          ? h("div", { className: "truncate font-mono text-[9.5px] text-slate-500" }, data.subtitle)
+          ? h("div", { className: "truncate pl-3 font-mono text-[10px] text-slate-400" }, data.subtitle)
           : null,
       ),
     ),
@@ -277,15 +281,20 @@ function GroupBox({ data }) {
 const NODE_TYPES = { aws: AwsNode, group: GroupBox };
 
 /* layout geometry */
-const A_NODE_W = 172, A_NODE_H = 54, A_GAP = 14;
-const A_SUB_PADX = 14, A_SUB_HEAD = 36, A_SUB_PADB = 14, A_SUB_COLS = 3;
-const A_VPC_PADX = 20, A_VPC_HEAD = 46, A_VPC_PADB = 20, A_VPC_MAXW = 1240;
-const A_LANE_COLS = 6;
+const A_NODE_W = 208, A_NODE_H = 54, A_GAP = 12;
+const A_SUB_PADX = 12, A_SUB_HEAD = 44, A_SUB_PADB = 12, A_SUB_COLS = 2;
+const A_AZ_PADX = 12, A_AZ_HEAD = 30, A_AZ_PADB = 12;
+const A_VPC_PADX = 18, A_VPC_HEAD = 52, A_VPC_PADB = 18;
+const A_LANE_COLS = 8;
 
-// Labels that describe topology. IAM (220+ nodes here) and ENIs (one per
-// attachment) are not drawn on an architecture diagram — they would bury the
-// thing the diagram is for.
-const ARCH_EXCLUDE = new Set(["IAMROLE", "IAMPOLICY", "IAMPROFILE", "IAMUSER", "ACCOUNT", "ENI", "AMI"]);
+// An architecture diagram shows workloads and boundaries. Security groups,
+// route tables, NACLs, target groups, EIPs and volumes are configuration
+// attached to those workloads — drawing a box per item buried the subnets under
+// 45 rows of them. They remain in the flow view, where relationships are the point.
+const ARCH_EXCLUDE = new Set([
+  "IAMROLE", "IAMPOLICY", "IAMPROFILE", "IAMUSER", "ACCOUNT", "ENI", "AMI",
+  "SG", "NACL", "ROUTETABLE", "TARGETGROUP", "EIP", "VOLUME", "DBSG", "FLOWLOG",
+]);
 // Regional/global services live outside the VPC boundary.
 const ARCH_GLOBAL = new Set(["S3BUCKET", "DYNAMODBTABLE", "ECRREPOSITORY"]);
 
@@ -394,7 +403,9 @@ function layoutArchitecture(graph, opts) {
       id: n.id, type: "aws", parentId, extent: parentId ? "parent" : undefined,
       position: { x, y },
       data: {
-        name: n.name || n.id.split("/").pop(), label: n.label,
+        // RDS/ElastiCache ARNs are colon-separated, so a "/" split returns the
+        // whole ARN. Fall back through both separators.
+        name: n.name || n.id.split("/").pop().split(":").pop(), label: n.label,
         marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
         resourceLabel: n.label, icon: iconFor(n.label, n.properties),
         accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
@@ -407,48 +418,52 @@ function layoutArchitecture(graph, opts) {
   // --- size each subnet from its contents, then pack subnets into their VPC ---
   const subSize = new Map();
   for (const s of subnets) {
-    const g = gridSize(inSubnet.get(s.id).length, A_SUB_COLS, A_NODE_W, A_NODE_H, A_GAP);
+    const n = inSubnet.get(s.id).length;
+    // Grow a dense subnet sideways rather than into a 7-row tower, otherwise one
+    // busy AZ stretches its column far past the others and the VPC fills with
+    // empty space.
+    const cols = Math.max(A_SUB_COLS, Math.min(4, Math.ceil(Math.sqrt(n))));
+    const g = gridSize(n, cols, A_NODE_W, A_NODE_H, A_GAP);
     subSize.set(s.id, { w: g.w + 2 * A_SUB_PADX, h: A_SUB_HEAD + g.h + A_SUB_PADB, g });
   }
 
   let cursorY = 0;
-  const vpcBoxes = [];
   for (const v of vpcs) {
-    const mine = subnets
-      .filter((s) => (vpcOf.get(s.id) ?? vpcKeyByShort.get(prop(s, "vpc_id"))) === v.id)
-      .sort((a, b) => String(prop(a, "az")).localeCompare(String(prop(b, "az"))));
+    const mine = subnets.filter((s) => (vpcOf.get(s.id) ?? vpcKeyByShort.get(prop(s, "vpc_id"))) === v.id);
 
-    // pack subnet boxes into rows
-    const placed = [];
-    let rowX = 0, rowY = 0, rowH = 0, innerW = 0;
-    for (const s of mine) {
-      const sz = subSize.get(s.id);
-      if (rowX > 0 && rowX + sz.w > A_VPC_MAXW) { rowX = 0; rowY += rowH + A_GAP; rowH = 0; }
-      placed.push({ s, x: rowX, y: rowY, sz });
-      rowX += sz.w + A_GAP;
-      rowH = Math.max(rowH, sz.h);
-      innerW = Math.max(innerW, rowX - A_GAP);
-    }
-    let innerH = mine.length ? rowY + rowH : 0;
+    // Availability zones become columns — the structure every AWS architecture
+    // diagram uses, and it lays the VPC out wide instead of one tall stack.
+    const azNames = [...new Set(mine.map((s) => prop(s, "az") || "no-az"))].sort();
+    const azCols = azNames.map((az) => {
+      // public subnets on top, matching how traffic flows in
+      const subs = mine.filter((s) => (prop(s, "az") || "no-az") === az)
+        .sort((a, b) => Number(Boolean(prop(b, "map_public_ip"))) - Number(Boolean(prop(a, "map_public_ip"))));
+      const w = Math.max(...subs.map((s) => subSize.get(s.id).w), A_NODE_W);
+      const h = subs.reduce((acc, s) => acc + subSize.get(s.id).h, 0) + Math.max(0, subs.length - 1) * A_GAP;
+      return { az, subs, w: w + 2 * A_AZ_PADX, h: A_AZ_HEAD + h + A_AZ_PADB };
+    });
 
-    // VPC-level resources (no subnet): IGW, route tables, NACLs, SGs, LBs
+    let innerW = azCols.reduce((acc, c) => acc + c.w, 0) + Math.max(0, azCols.length - 1) * A_GAP;
+    let innerH = Math.max(0, ...azCols.map((c) => c.h));
+
+    // Anything VPC-scoped but not in a subnet (load balancers, gateways).
     const loose = inVpcOnly.get(v.id) ?? [];
     let looseTop = 0;
     if (loose.length) {
       looseTop = innerH ? innerH + A_GAP : 0;
-      const g = gridSize(loose.length, Math.max(A_SUB_COLS, Math.floor(A_VPC_MAXW / (A_NODE_W + A_GAP))), A_NODE_W, A_NODE_H, A_GAP);
+      const cols = Math.max(2, Math.min(loose.length, Math.floor(Math.max(innerW, A_NODE_W * 3) / (A_NODE_W + A_GAP))));
+      const g = gridSize(loose.length, cols, A_NODE_W, A_NODE_H, A_GAP);
       innerW = Math.max(innerW, g.w);
       innerH = looseTop + g.h;
+      loose.cols = g.cols;
     }
 
     const box = {
-      id: v.id,
-      w: Math.max(innerW, 320) + 2 * A_VPC_PADX,
+      w: Math.max(innerW, 340) + 2 * A_VPC_PADX,
       h: A_VPC_HEAD + Math.max(innerH, A_NODE_H) + A_VPC_PADB,
       x: 0, y: cursorY,
     };
-    vpcBoxes.push(box);
-    cursorY += box.h + 28;
+    cursorY += box.h + 26;
 
     out.push({
       id: v.id, type: "group", position: { x: box.x, y: box.y },
@@ -461,32 +476,51 @@ function layoutArchitecture(graph, opts) {
       },
     });
 
-    for (const p of placed) {
-      const isPublic = prop(p.s, "map_public_ip");
+    let azX = 0;
+    for (const col of azCols) {
+      const azId = `${v.id}__az__${col.az}`;
       out.push({
-        id: p.s.id, type: "group", parentId: v.id, extent: "parent",
-        position: { x: A_VPC_PADX + p.x, y: A_VPC_HEAD + p.y },
-        style: { width: p.sz.w, height: p.sz.h },
+        id: azId, type: "group", parentId: v.id, extent: "parent",
+        position: { x: A_VPC_PADX + azX, y: A_VPC_HEAD },
+        style: { width: col.w, height: col.h },
         selectable: false, draggable: false, zIndex: 1,
         data: {
-          title: p.s.name || p.s.id.split("/").pop(),
-          subtitle: [isPublic ? "public" : "private", prop(p.s, "az"), prop(p.s, "cidr_block")].filter(Boolean).join("   ·   "),
-          fill: isPublic ? "rgba(34,197,94,0.06)" : "rgba(56,189,248,0.05)",
-          stroke: isPublic ? "#22c55e" : "#38bdf8",
-          borderStyle: isPublic ? "solid" : "dashed",
-          icon: isPublic ? IconPublicSubnet : IconPrivateSubnet,
+          title: col.az, fill: "rgba(148,163,184,0.03)", stroke: "#475569",
+          borderStyle: "dashed", borderWidth: 1,
         },
       });
-      inSubnet.get(p.s.id).forEach((m, i) => {
-        const col = i % p.sz.g.cols, row = Math.floor(i / p.sz.g.cols);
-        leaf(m, p.s.id, A_SUB_PADX + col * (A_NODE_W + A_GAP), A_SUB_HEAD + row * (A_NODE_H + A_GAP));
-      });
+
+      let subY = A_AZ_HEAD;
+      for (const s of col.subs) {
+        const sz = subSize.get(s.id);
+        const isPublic = Boolean(prop(s, "map_public_ip"));
+        out.push({
+          id: s.id, type: "group", parentId: azId, extent: "parent",
+          position: { x: A_AZ_PADX, y: subY },
+          style: { width: sz.w, height: sz.h },
+          selectable: false, draggable: false, zIndex: 2,
+          data: {
+            title: s.name || s.id.split("/").pop(),
+            subtitle: [isPublic ? "public" : "private", prop(s, "cidr_block")].filter(Boolean).join("   ·   "),
+            fill: isPublic ? "rgba(34,197,94,0.07)" : "rgba(56,189,248,0.06)",
+            stroke: isPublic ? "#22c55e" : "#38bdf8",
+            borderStyle: isPublic ? "solid" : "dashed",
+            icon: isPublic ? IconPublicSubnet : IconPrivateSubnet,
+          },
+        });
+        inSubnet.get(s.id).forEach((m, i) => {
+          const c = i % sz.g.cols, r = Math.floor(i / sz.g.cols);
+          leaf(m, s.id, A_SUB_PADX + c * (A_NODE_W + A_GAP), A_SUB_HEAD + r * (A_NODE_H + A_GAP));
+        });
+        subY += sz.h + A_GAP;
+      }
+      azX += col.w + A_GAP;
     }
 
-    const looseCols = Math.max(A_SUB_COLS, Math.floor(A_VPC_MAXW / (A_NODE_W + A_GAP)));
+    const looseCols = loose.cols || 2;
     loose.forEach((m, i) => {
-      const col = i % looseCols, row = Math.floor(i / looseCols);
-      leaf(m, v.id, A_VPC_PADX + col * (A_NODE_W + A_GAP), A_VPC_HEAD + looseTop + row * (A_NODE_H + A_GAP));
+      const c = i % looseCols, r = Math.floor(i / looseCols);
+      leaf(m, v.id, A_VPC_PADX + c * (A_NODE_W + A_GAP), A_VPC_HEAD + looseTop + r * (A_NODE_H + A_GAP));
     });
   }
 
