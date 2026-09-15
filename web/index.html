@@ -3,21 +3,47 @@
 <head>
   <meta charset="UTF-8" />
   <title>AWSome — Graph</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230a0f1c'/%3E%3Ccircle cx='16' cy='9' r='3.2' fill='%2338bdf8'/%3E%3Ccircle cx='9' cy='22' r='3.2' fill='%2338bdf8'/%3E%3Ccircle cx='23' cy='22' r='3.2' fill='%2338bdf8'/%3E%3Cpath d='M16 9 9 22M16 9l7 13M9 22h14' stroke='%23334155' stroke-width='1.6' fill='none'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
   <script type="importmap">
   {
-    "imports": {
-      "react": "https://esm.sh/react@18.3.1",
-      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-      "@xyflow/react": "https://esm.sh/@xyflow/react@12.3.5?deps=react@18.3.1,react-dom@18.3.1",
-      "dagre": "https://esm.sh/dagre@0.8.5",
-      "marked": "https://esm.sh/marked@12.0.2",
-      "dompurify": "https://esm.sh/dompurify@3.1.6"
-    }
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "@xyflow/react": "https://esm.sh/@xyflow/react@12.3.5?deps=react@18.3.1,react-dom@18.3.1",
+    "dagre": "https://esm.sh/dagre@0.8.5",
+    "marked": "https://esm.sh/marked@12.0.2",
+    "dompurify": "https://esm.sh/dompurify@3.1.6",
+    "@aws-icons/react/architecture-service/amazon-ec2": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-ec2?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-simple-storage-service": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-simple-storage-service?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-rds": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-rds?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/aws-lambda": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/aws-lambda?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-dynamo-db": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-dynamo-db?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-elasti-cache": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-elasti-cache?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-elastic-container-service": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-elastic-container-service?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-elastic-kubernetes-service": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-elastic-kubernetes-service?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-elastic-container-registry": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-elastic-container-registry?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/elastic-load-balancing": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/elastic-load-balancing?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/aws-identity-and-access-management": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/aws-identity-and-access-management?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-elastic-block-store": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-elastic-block-store?deps=react@18.3.1",
+    "@aws-icons/react/architecture-service/amazon-redshift": "https://esm.sh/@aws-icons/react@4.1.0/architecture-service/amazon-redshift?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-vpc-elastic-network-interface": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-vpc-elastic-network-interface?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-vpc-flow-logs": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-vpc-flow-logs?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-vpc-internet-gateway": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-vpc-internet-gateway?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-vpc-network-access-control-list": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-vpc-network-access-control-list?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-ec2-elastic-ip-address": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-ec2-elastic-ip-address?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-ec2-ami": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-ec2-ami?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-vpc-peering-connection": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-vpc-peering-connection?deps=react@18.3.1",
+    "@aws-icons/react/resource/amazon-route-53-route-table": "https://esm.sh/@aws-icons/react@4.1.0/resource/amazon-route-53-route-table?deps=react@18.3.1",
+    "@aws-icons/react/architecture-group/virtual-private-cloud-vpc": "https://esm.sh/@aws-icons/react@4.1.0/architecture-group/virtual-private-cloud-vpc?deps=react@18.3.1",
+    "@aws-icons/react/architecture-group/public-subnet": "https://esm.sh/@aws-icons/react@4.1.0/architecture-group/public-subnet?deps=react@18.3.1",
+    "@aws-icons/react/architecture-group/private-subnet": "https://esm.sh/@aws-icons/react@4.1.0/architecture-group/private-subnet?deps=react@18.3.1",
+    "@aws-icons/react/architecture-group/auto-scaling-group": "https://esm.sh/@aws-icons/react@4.1.0/architecture-group/auto-scaling-group?deps=react@18.3.1"
   }
+}
   </script>
 <link rel="stylesheet" href="https://esm.sh/@xyflow/react@12.3.5/dist/style.css" />
 </head>
