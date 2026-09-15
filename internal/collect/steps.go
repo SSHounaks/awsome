@@ -30,6 +30,7 @@ func Plan(target Target) []Step {
 	}
 	if len(target.Regions) > 0 {
 		steps = append(steps, Step{Service: "iam", Region: target.Regions[0], AccountID: target.AccountID, Partition: target.Partition})
+		steps = append(steps, Step{Service: "iam-credentials", Region: target.Regions[0], AccountID: target.AccountID, Partition: target.Partition})
 		steps = append(steps, Step{Service: "trail", Region: target.Regions[0], AccountID: target.AccountID, Partition: target.Partition})
 	}
 	return steps
@@ -92,6 +93,8 @@ func RunStep(ctx context.Context, cfg Config, step Step, snapshotID string, emit
 		return collectFlowLogs(ctx, cfg, a, emit)
 	case "iam":
 		return collectIam(ctx, cfg, a, emit)
+	case "iam-credentials":
+		return collectIamCredentials(ctx, cfg, a, emit)
 	case "trail":
 		return collectTrail(ctx, cfg, a)
 	default:

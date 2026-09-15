@@ -47,7 +47,7 @@ const AWS_ICON = {
   DYNAMODBTABLE: IconDynamo,
   ELASTICACHE: IconElastiCache,
   ECSCLUSTER: IconEcs,
-  EKSCLUSTER: IconEks,
+  EKS: IconEks,
   ECRREPOSITORY: IconEcr,
   LB: IconElb,
   TARGETGROUP: IconElb,
@@ -206,7 +206,7 @@ const COLORS = {
   NACL: "#6b7280", RDS: "#b91c1c", REDSHIFT: "#881337", ELASTICACHE: "#9d174d",
   LB: "#ec4899", TARGETGROUP: "#db2777", ASG: "#8b5cf6", DYNAMODBTABLE: "#2563eb",
   IAMPROFILE: "#a16207", IAMPOLICY: "#ca8a04", AMI: "#64748b", OPENSEARCH: "#0ea5e9",
-  ECSCLUSTER: "#059669", EKSCLUSTER: "#0284c7", ECRREPO: "#4f46e5", FLOWLOG: "#71717a",
+  ECSCLUSTER: "#059669", EKS: "#0284c7", ECRREPOSITORY: "#4f46e5", FLOWLOG: "#71717a",
 };
 const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", low: "#64748b" };
 
@@ -217,13 +217,15 @@ const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", l
  */
 const AwsNode = React.memo(function AwsNode({ data }) {
   const Icon = data.icon;
+  // Fills the box the layout allocated. Sizing to content instead made every
+  // node a different width, so a fixed-grid layout could never line up: wide
+  // ones overlapped their neighbour and pushed through the container border.
   return h("div", {
-    className: "flex items-center gap-2.5 rounded-lg border px-3 py-2 shadow-lg",
+    className: "flex h-full w-full items-center gap-2.5 overflow-hidden rounded-lg border px-3 shadow-lg",
     style: {
       background: "#0d1320",
       borderColor: data.accentColor ?? "#475569",
       borderWidth: data.emphasised ? 2 : 1,
-      minWidth: 188,
     },
     title: data.title,
   },
@@ -234,16 +236,383 @@ const AwsNode = React.memo(function AwsNode({ data }) {
           className: "flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded font-mono text-[13px] font-bold",
           style: { background: data.accentColor ?? "#334155", color: "#0b1220" },
         }, (data.label ?? "?").slice(0, 2)),
-    h("div", { className: "min-w-0 leading-tight" },
-      h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100", style: { maxWidth: 150 } },
+    h("div", { className: "min-w-0 flex-1 leading-tight" },
+      h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100" },
         (data.marker ?? "") + (data.name ?? "")),
-      h("div", { className: "font-mono text-[9.5px] uppercase tracking-wide text-slate-500" }, data.label),
+      h("div", { className: "truncate font-mono text-[9.5px] uppercase tracking-wide text-slate-500" }, data.label),
     ),
     h(Handle, { type: "source", position: Position.Right, style: { opacity: 0, width: 1, height: 1 } }),
   );
 });
 
-const NODE_TYPES = { aws: AwsNode };
+/* ---------- architecture view: nested container nodes ----------
+ * React Flow renders containment through parentId + relative child positions,
+ * which is what an AWS architecture diagram is: a VPC rectangle holding subnet
+ * rectangles holding resources.
+ */
+function GroupBox({ data }) {
+  return h("div", {
+    className: "h-full w-full rounded-xl",
+    style: {
+      background: data.fill,
+      border: `${data.borderWidth ?? 1.5}px ${data.borderStyle ?? "solid"} ${data.stroke}`,
+      boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.02)",
+    },
+  },
+    // Handles so an edge pointing at a container (e.g. FLOWS_ON -> VPC) still
+    // has somewhere to attach.
+    h(Handle, { type: "target", position: Position.Left, style: { opacity: 0, width: 1, height: 1 } }),
+    h("div", { className: "flex items-center gap-2 px-3 pt-2" },
+      data.icon ? h(data.icon, { width: 18, height: 18, style: { flexShrink: 0 } }) : null,
+      h("div", { className: "min-w-0" },
+        // Title stays near-white for legibility; the boundary colour carries the
+        // public/private distinction via the border and a small leading dot.
+        h("div", { className: "flex items-center gap-1.5" },
+          h("span", { className: "h-1.5 w-1.5 shrink-0 rounded-full", style: { background: data.stroke } }),
+          h("div", { className: "truncate font-mono text-[11.5px] font-semibold text-slate-100" }, data.title),
+        ),
+        data.subtitle
+          ? h("div", { className: "truncate pl-3 font-mono text-[10px] text-slate-400" }, data.subtitle)
+          : null,
+      ),
+    ),
+    h(Handle, { type: "source", position: Position.Right, style: { opacity: 0, width: 1, height: 1 } }),
+  );
+}
+
+const NODE_TYPES = { aws: AwsNode, group: GroupBox };
+
+/* layout geometry */
+const A_NODE_W = 208, A_NODE_H = 54, A_GAP = 14;
+const A_SUB_PADX = 20, A_SUB_HEAD = 58, A_SUB_PADB = 20, A_SUB_COLS = 2;
+const A_AZ_PADX = 18, A_AZ_HEAD = 44, A_AZ_PADB = 18;
+const A_VPC_PADX = 24, A_VPC_HEAD = 60, A_VPC_PADB = 24;
+const A_LANE_PADX = 20, A_LANE_HEAD = 46, A_LANE_PADB = 20, A_LANE_COLS = 8;
+
+// An architecture diagram shows workloads and boundaries. Security groups,
+// route tables, NACLs, target groups, EIPs and volumes are configuration
+// attached to those workloads — drawing a box per item buried the subnets under
+// 45 rows of them. They remain in the flow view, where relationships are the point.
+const ARCH_EXCLUDE = new Set([
+  "IAMROLE", "IAMPOLICY", "IAMPROFILE", "IAMUSER", "ACCOUNT", "ENI", "AMI",
+  "SG", "NACL", "ROUTETABLE", "TARGETGROUP", "EIP", "VOLUME", "DBSG", "FLOWLOG",
+]);
+// Regional/global services live outside the VPC boundary.
+const ARCH_GLOBAL = new Set(["S3BUCKET", "DYNAMODBTABLE", "ECRREPOSITORY"]);
+
+function gridSize(n, cols, w, h, gap) {
+  const c = Math.max(1, Math.min(cols, n));
+  const r = Math.max(1, Math.ceil(n / c));
+  return { cols: c, rows: r, w: c * w + (c - 1) * gap, h: r * h + (r - 1) * gap };
+}
+
+// layoutArchitecture turns the flat graph into nested VPC > subnet > resource
+// boxes. Containment comes from vpc_id/subnet_id properties, falling back to
+// IN_VPC / IN_SUBNET edges for resources that only express it as an edge
+// (Lambda, for instance, carries no subnet_id property).
+function layoutArchitecture(graph, opts) {
+  const { overlayByKey, region } = opts;
+  // Containment is resolved over every node, then filtered for drawing. An
+  // Elastic IP reaches its subnet through an ENI, and ENIs are not drawn — so
+  // excluding them before resolution would strand the EIP outside the VPC.
+  const allNodes = graph.nodes;
+  const nodes = allNodes.filter((n) => !ARCH_EXCLUDE.has(n.label));
+  const byId = new Map(allNodes.map((n) => [n.id, n]));
+  const prop = (n, k) => (n.properties ?? {})[k];
+
+  const vpcs = nodes.filter((n) => n.label === "VPC");
+  const subnets = nodes.filter((n) => n.label === "SUBNET");
+
+  // Resolve short ids (vpc-abc, subnet-abc) to the ARN keys used as node ids.
+  const vpcKeyByShort = new Map(vpcs.map((v) => [v.id.split("/").pop(), v.id]));
+  const subKeyByShort = new Map(subnets.map((s) => [s.id.split("/").pop(), s.id]));
+
+  const subnetOf = new Map(), vpcOf = new Map();
+  for (const n of allNodes) {
+    const s = prop(n, "subnet_id"), v = prop(n, "vpc_id");
+    if (s && subKeyByShort.has(s)) subnetOf.set(n.id, subKeyByShort.get(s));
+    if (v && vpcKeyByShort.has(v)) vpcOf.set(n.id, vpcKeyByShort.get(v));
+  }
+  for (const e of graph.edges) {
+    if (!byId.has(e.from)) continue;
+    if (e.type === "IN_SUBNET" && byId.has(e.to) && !subnetOf.has(e.from)) subnetOf.set(e.from, e.to);
+    if ((e.type === "IN_VPC" || e.type === "PART_OF") && byId.has(e.to) && !vpcOf.has(e.from)) vpcOf.set(e.from, e.to);
+  }
+  // An auto-scaling group names its subnets rather than its VPC.
+  for (const n of allNodes) {
+    if (vpcOf.has(n.id)) continue;
+    const zones = prop(n, "vpc_zone_identifiers");
+    const first = (Array.isArray(zones) ? zones : String(zones ?? "").split(","))
+      .map((s) => s.trim()).filter(Boolean)[0];
+    if (first && subKeyByShort.has(first)) subnetOf.set(n.id, subKeyByShort.get(first));
+  }
+
+  // Several resources express containment only through an attachment: an
+  // internet gateway is ATTACHED_TO its VPC, a flow log FLOWS_ON one, a volume
+  // is ATTACHED_TO an instance, an ElastiCache node ASSOC_WITH a security group.
+  // Inherit placement across those rather than special-casing each label —
+  // otherwise the internet gateway floats outside the VPC it belongs to.
+  const ATTACH = new Set(["ATTACHED_TO", "ASSOC_WITH", "FLOWS_ON", "PART_OF", "CONTAINS", "USES_SUBGRP"]);
+  const outgoing = new Map();
+  for (const e of graph.edges) {
+    if (!ATTACH.has(e.type)) continue;
+    if (!outgoing.has(e.from)) outgoing.set(e.from, []);
+    outgoing.get(e.from).push(e);
+  }
+  // Two passes so volume -> instance -> subnet -> vpc resolves.
+  for (let pass = 0; pass < 3; pass++) {
+    for (const n of allNodes) {
+      if (subnetOf.has(n.id) && vpcOf.has(n.id)) continue;
+      for (const e of outgoing.get(n.id) ?? []) {
+        // Only a direct attachment implies sharing the target's subnet; being
+        // associated with a security group says nothing about placement.
+        if (!subnetOf.has(n.id) && e.type === "ATTACHED_TO" && subnetOf.has(e.to)) {
+          subnetOf.set(n.id, subnetOf.get(e.to));
+        }
+        if (!vpcOf.has(n.id)) {
+          if (byId.get(e.to)?.label === "VPC") vpcOf.set(n.id, e.to);
+          else if (vpcOf.has(e.to)) vpcOf.set(n.id, vpcOf.get(e.to));
+        }
+      }
+    }
+  }
+
+  // A resource in a subnet is in that subnet's VPC.
+  for (const [id, sub] of subnetOf) {
+    if (!vpcOf.has(id)) {
+      const parentVpc = vpcOf.get(sub) ?? (byId.get(sub) && vpcKeyByShort.get(prop(byId.get(sub), "vpc_id")));
+      if (parentVpc) vpcOf.set(id, parentVpc);
+    }
+  }
+
+  const isContainer = (n) => n.label === "VPC" || n.label === "SUBNET";
+  const members = nodes.filter((n) => !isContainer(n));
+
+  const inSubnet = new Map(subnets.map((s) => [s.id, []]));
+  const inVpcOnly = new Map(vpcs.map((v) => [v.id, []]));
+  const global = [];
+  for (const m of members) {
+    const s = subnetOf.get(m.id), v = vpcOf.get(m.id);
+    if (s && inSubnet.has(s) && !ARCH_GLOBAL.has(m.label)) inSubnet.get(s).push(m);
+    else if (v && inVpcOnly.has(v) && !ARCH_GLOBAL.has(m.label)) inVpcOnly.get(v).push(m);
+    else global.push(m);
+  }
+
+  const out = [];
+  const leaf = (n, parentId, x, y) => {
+    const ov = overlayByKey?.get(n.id);
+    out.push({
+      id: n.id, type: "aws", parentId, extent: parentId ? "parent" : undefined,
+      position: { x, y },
+      // Explicit size: the layout reserves exactly this much room, so the node
+      // must occupy exactly this much and no more.
+      style: { width: A_NODE_W, height: A_NODE_H },
+      width: A_NODE_W, height: A_NODE_H,
+      data: {
+        // RDS/ElastiCache ARNs are colon-separated, so a "/" split returns the
+        // whole ARN. Fall back through both separators.
+        name: n.name || n.id.split("/").pop().split(":").pop(), label: n.label,
+        marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
+        resourceLabel: n.label, icon: iconFor(n.label, n.properties),
+        accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
+        emphasised: Boolean(ov),
+        title: `${n.name || ""}\n${n.label}\n${n.id}`,
+      },
+    });
+  };
+
+  // --- size each subnet from its contents, then pack subnets into their VPC ---
+  const subSize = new Map();
+  for (const s of subnets) {
+    const n = inSubnet.get(s.id).length;
+    // Grow a dense subnet sideways rather than into a 7-row tower, otherwise one
+    // busy AZ stretches its column far past the others and the VPC fills with
+    // empty space.
+    const cols = Math.max(A_SUB_COLS, Math.min(4, Math.ceil(Math.sqrt(n))));
+    const g = gridSize(n, cols, A_NODE_W, A_NODE_H, A_GAP);
+    subSize.set(s.id, { w: g.w + 2 * A_SUB_PADX, h: A_SUB_HEAD + g.h + A_SUB_PADB, g });
+  }
+
+  let cursorY = 0;
+  for (const v of vpcs) {
+    const mine = subnets.filter((s) => (vpcOf.get(s.id) ?? vpcKeyByShort.get(prop(s, "vpc_id"))) === v.id);
+
+    // Availability zones become columns — the structure every AWS architecture
+    // diagram uses, and it lays the VPC out wide instead of one tall stack.
+    const azNames = [...new Set(mine.map((s) => prop(s, "az") || "no-az"))].sort();
+    const azCols = azNames.map((az) => {
+      // public subnets on top, matching how traffic flows in
+      const subs = mine.filter((s) => (prop(s, "az") || "no-az") === az)
+        .sort((a, b) => Number(Boolean(prop(b, "map_public_ip"))) - Number(Boolean(prop(a, "map_public_ip"))));
+      const w = Math.max(...subs.map((s) => subSize.get(s.id).w), A_NODE_W);
+      const h = subs.reduce((acc, s) => acc + subSize.get(s.id).h, 0) + Math.max(0, subs.length - 1) * A_GAP;
+      return { az, subs, w: w + 2 * A_AZ_PADX, h: A_AZ_HEAD + h + A_AZ_PADB };
+    });
+
+    let innerW = azCols.reduce((acc, c) => acc + c.w, 0) + Math.max(0, azCols.length - 1) * A_GAP;
+    let innerH = Math.max(0, ...azCols.map((c) => c.h));
+
+    // Anything VPC-scoped but not in a subnet (load balancers, gateways).
+    const loose = inVpcOnly.get(v.id) ?? [];
+    let looseTop = 0;
+    if (loose.length) {
+      looseTop = innerH ? innerH + A_GAP : 0;
+      const cols = Math.max(2, Math.min(loose.length, Math.floor(Math.max(innerW, A_NODE_W * 3) / (A_NODE_W + A_GAP))));
+      const g = gridSize(loose.length, cols, A_NODE_W, A_NODE_H, A_GAP);
+      innerW = Math.max(innerW, g.w);
+      innerH = looseTop + g.h;
+      loose.cols = g.cols;
+    }
+
+    const box = {
+      w: Math.max(innerW, 340) + 2 * A_VPC_PADX,
+      h: A_VPC_HEAD + Math.max(innerH, A_NODE_H) + A_VPC_PADB,
+      x: 0, y: cursorY,
+    };
+    cursorY += box.h + 26;
+
+    out.push({
+      id: v.id, type: "group", position: { x: box.x, y: box.y },
+      style: { width: box.w, height: box.h },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `VPC  ${v.name || v.id.split("/").pop()}`,
+        subtitle: [prop(v, "cidr_block"), prop(v, "default_vpc") ? "default VPC" : null].filter(Boolean).join("   ·   "),
+        fill: "rgba(99,102,241,0.05)", stroke: "#6366f1", icon: IconVpc,
+      },
+    });
+
+    let azX = 0;
+    for (const col of azCols) {
+      const azId = `${v.id}__az__${col.az}`;
+      out.push({
+        id: azId, type: "group", parentId: v.id, extent: "parent",
+        position: { x: A_VPC_PADX + azX, y: A_VPC_HEAD },
+        style: { width: col.w, height: col.h },
+        selectable: false, draggable: false, zIndex: 1,
+        data: {
+          title: col.az, fill: "rgba(148,163,184,0.03)", stroke: "#475569",
+          borderStyle: "dashed", borderWidth: 1,
+        },
+      });
+
+      let subY = A_AZ_HEAD;
+      for (const s of col.subs) {
+        const sz = subSize.get(s.id);
+        const isPublic = Boolean(prop(s, "map_public_ip"));
+        out.push({
+          id: s.id, type: "group", parentId: azId, extent: "parent",
+          position: { x: A_AZ_PADX, y: subY },
+          style: { width: sz.w, height: sz.h },
+          selectable: false, draggable: false, zIndex: 2,
+          data: {
+            title: s.name || s.id.split("/").pop(),
+            subtitle: [isPublic ? "public" : "private", prop(s, "cidr_block")].filter(Boolean).join("   ·   "),
+            fill: isPublic ? "rgba(34,197,94,0.07)" : "rgba(56,189,248,0.06)",
+            stroke: isPublic ? "#22c55e" : "#38bdf8",
+            borderStyle: isPublic ? "solid" : "dashed",
+            icon: isPublic ? IconPublicSubnet : IconPrivateSubnet,
+          },
+        });
+        inSubnet.get(s.id).forEach((m, i) => {
+          const c = i % sz.g.cols, r = Math.floor(i / sz.g.cols);
+          leaf(m, s.id, A_SUB_PADX + c * (A_NODE_W + A_GAP), A_SUB_HEAD + r * (A_NODE_H + A_GAP));
+        });
+        subY += sz.h + A_GAP;
+      }
+      azX += col.w + A_GAP;
+    }
+
+    const looseCols = loose.cols || 2;
+    loose.forEach((m, i) => {
+      const c = i % looseCols, r = Math.floor(i / looseCols);
+      leaf(m, v.id, A_VPC_PADX + c * (A_NODE_W + A_GAP), A_VPC_HEAD + looseTop + r * (A_NODE_H + A_GAP));
+    });
+  }
+
+  // --- regional / global services, grouped by service so like sits with like ---
+  if (global.length) {
+    const byLabel = new Map();
+    for (const m of global) {
+      if (!byLabel.has(m.label)) byLabel.set(m.label, []);
+      byLabel.get(m.label).push(m);
+    }
+    // Biggest groups first, so the lane reads densest-to-sparsest.
+    const buckets = [...byLabel.entries()]
+      .map(([label, items]) => {
+        const g = gridSize(items.length, A_LANE_COLS, A_NODE_W, A_NODE_H, A_GAP);
+        return { label, items, g, w: g.w + 2 * A_SUB_PADX, h: A_SUB_HEAD + g.h + A_SUB_PADB };
+      })
+      .sort((a, b) => b.items.length - a.items.length || a.label.localeCompare(b.label));
+
+    // Pack the service groups into rows. Stacking them vertically made the lane
+    // so tall that fitView zoomed out past readability, with four single-row
+    // groups each claiming a full row of their own.
+    const LANE_MAXW = 1560;
+    let lx = 0, ly = 0, rowH = 0, innerW = 0;
+    for (const b of buckets) {
+      if (lx > 0 && lx + b.w > LANE_MAXW) { lx = 0; ly += rowH + A_GAP; rowH = 0; }
+      b.x = lx; b.y = ly;
+      lx += b.w + A_GAP;
+      rowH = Math.max(rowH, b.h);
+      innerW = Math.max(innerW, lx - A_GAP);
+    }
+    const innerH = ly + rowH;
+    const box = { w: innerW + 2 * A_LANE_PADX, h: A_LANE_HEAD + innerH + A_LANE_PADB, x: 0, y: cursorY };
+
+    out.push({
+      id: "__region_lane__", type: "group", position: { x: box.x, y: box.y },
+      style: { width: box.w, height: box.h },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: "Regional & global services",
+        subtitle: region ? `${region}   ·   outside the VPC boundary` : "outside the VPC boundary",
+        fill: "rgba(148,163,184,0.04)", stroke: "#64748b", borderStyle: "dashed",
+      },
+    });
+
+    for (const b of buckets) {
+      const gid = `__lane__${b.label}`;
+      out.push({
+        id: gid, type: "group", parentId: "__region_lane__", extent: "parent",
+        position: { x: A_LANE_PADX + b.x, y: A_LANE_HEAD + b.y },
+        style: { width: b.w, height: b.h },
+        selectable: false, draggable: false, zIndex: 1,
+        data: {
+          title: LANE_TITLES[b.label] ?? b.label,
+          subtitle: `${b.items.length}`,
+          fill: "rgba(148,163,184,0.04)", stroke: COLORS[b.label] ?? "#64748b",
+          borderStyle: "solid", borderWidth: 1,
+          icon: iconFor(b.label, null),
+        },
+      });
+      b.items.forEach((m, i) => {
+        const c = i % b.g.cols, r = Math.floor(i / b.g.cols);
+        leaf(m, gid, A_SUB_PADX + c * (A_NODE_W + A_GAP), A_SUB_HEAD + r * (A_NODE_H + A_GAP));
+      });
+    }
+  }
+
+  return out;
+}
+
+const LANE_TITLES = {
+  S3BUCKET: "S3 buckets",
+  ECRREPOSITORY: "ECR repositories",
+  DYNAMODBTABLE: "DynamoDB tables",
+  LAMBDA: "Lambda functions (no VPC)",
+  ECSCLUSTER: "ECS clusters",
+  EKS: "EKS clusters",
+  ASG: "Auto Scaling groups",
+  IGW: "Internet gateways (detached)",
+  VOLUME: "EBS volumes (unattached)",
+  RDS: "RDS instances",
+  ELASTICACHE: "ElastiCache clusters",
+};
+
+// Containment is drawn as nesting in the architecture view, so those edges would
+// just be noise on top of it.
+const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS"]);
 
 function layoutGraph(nodes, edges) {
   const g = new dagre.graphlib.Graph();
@@ -258,7 +627,7 @@ function layoutGraph(nodes, edges) {
   });
 }
 
-function Diagram({ graph, findingsGraph, diffOverlay }) {
+function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) {
   if (!graph) {
     return h("div", { className: "flex h-full items-center justify-center text-sm text-slate-500" },
       h("div", { className: "h-6 w-6 animate-spin rounded-full border-2 border-white/10 border-t-sky-400" }));
@@ -286,6 +655,9 @@ function Diagram({ graph, findingsGraph, diffOverlay }) {
       const marker = ov === "add" ? "+ " : ov === "mod" ? "~ " : "";
       return {
         id: n.id, type: "aws",
+        // matches the box dagre reserves in layoutGraph
+        style: { width: 210, height: 56 },
+        width: 210, height: 56,
         data: {
           name,
           label: n.label,
@@ -312,12 +684,239 @@ function Diagram({ graph, findingsGraph, diffOverlay }) {
   const allNodes = useMemo(() => [...dagreNodes, ...findNodes], [dagreNodes, findNodes]);
   const allEdges = useMemo(() => [...dagreEdges, ...findEdges], [dagreEdges, findEdges]);
   const layoutedNodes = useMemo(() => layoutGraph(allNodes, allEdges), [allNodes, allEdges]);
+
+  const archNodes = useMemo(
+    () => (view === "arch" ? layoutArchitecture(graph, { overlayByKey, region }) : []),
+    [view, graph, overlayByKey, region],
+  );
+  const archEdges = useMemo(() => {
+    if (view !== "arch") return [];
+    const drawn = new Set(archNodes.map((n) => n.id));
+    // An edge pointing at a container the source already sits inside (an
+    // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
+    // its own border. Nesting already states it.
+    const containers = new Set(
+      graph.nodes.filter((n) => n.label === "VPC" || n.label === "SUBNET").map((n) => n.id),
+    );
+    return graph.edges
+      .filter((e) => !ARCH_HIDDEN_EDGES.has(e.type) && drawn.has(e.from) && drawn.has(e.to))
+      .filter((e) => !containers.has(e.to) && !containers.has(e.from))
+      .map((e) => ({
+        id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
+        animated: e.type === "REFERENCES",
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
+        style: e.type === "REFERENCES"
+          ? { stroke: "#f97316", strokeDasharray: "5 5", strokeWidth: 1.2 }
+          : { stroke: "#475569", strokeWidth: 1.2 },
+        labelStyle: { fontSize: 0 }, zIndex: 5,
+      }));
+  }, [view, graph, archNodes]);
+
+  const isArch = view === "arch";
+  const [selected, setSelected] = useState(null);
+  // A node that vanishes between views (or between snapshots) must not leave a
+  // stale panel open.
+  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
+  useEffect(() => { setSelected(null); }, [view]);
+
+  const selectedNode = selected && nodeById.has(selected)
+    ? { ...nodeById.get(selected), icon: iconFor(nodeById.get(selected).label, nodeById.get(selected).properties) }
+    : null;
+
+  const onNodeClick = (_e, n) => {
+    // Containers carry no resource of their own; clicking one should not open a
+    // panel describing a boundary.
+    if (n?.type === "group") { setSelected(null); return; }
+    setSelected(n?.id ?? null);
+  };
+
   return h(ReactFlowProvider, null,
-    h(FlowCanvas, { nodes: layoutedNodes, edges: allEdges, overlayByKey, COLORS }),
+    h(FlowCanvas, {
+      nodes: isArch ? archNodes : layoutedNodes,
+      edges: isArch ? archEdges : allEdges,
+      overlayByKey, COLORS, viewKey: view,
+      onNodeClick,
+      onPaneClick: () => setSelected(null),
+      detail: h(DetailPanel, { node: selectedNode, findings, onClose: () => setSelected(null) }),
+      canExport: isArch,
+      exportTitle: `AWS architecture${region ? ` — ${region}` : ""}`,
+      exportFooter: `${graph.nodes.length} resources · generated by AWSome`,
+    }),
   );
 }
 
-function FlowCanvas({ nodes, edges, overlayByKey, COLORS }) {
+/* ---------- SVG export ----------
+ * Built from the layout data rather than by scraping the canvas: React Flow
+ * draws nodes as HTML, so there is no SVG to lift. The AWS icon glyphs *are*
+ * inline <svg>, so those are pulled from the DOM by node id and re-embedded,
+ * which keeps the export looking like the diagram instead of like boxes.
+ */
+const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+
+// Monospace at ~0.6em per char; truncate so text cannot spill past its box.
+function fitText(s, px, size) {
+  const max = Math.max(1, Math.floor(px / (size * 0.6)));
+  const str = String(s ?? "");
+  return str.length <= max ? str : str.slice(0, Math.max(1, max - 1)) + "…";
+}
+
+function architectureSvg(nodes, edges, meta) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const absCache = new Map();
+  const abs = (n) => {
+    if (absCache.has(n.id)) return absCache.get(n.id);
+    const p = n.parentId && byId.has(n.parentId) ? abs(byId.get(n.parentId)) : { x: 0, y: 0 };
+    const a = { x: p.x + (n.position?.x ?? 0), y: p.y + (n.position?.y ?? 0) };
+    absCache.set(n.id, a);
+    return a;
+  };
+
+  const sized = nodes.map((n) => {
+    const a = abs(n);
+    const w = n.style?.width ?? A_NODE_W, h = n.style?.height ?? A_NODE_H;
+    return { n, x: a.x, y: a.y, w, h };
+  });
+
+  const PAD = 32;
+  const maxX = Math.max(...sized.map((s) => s.x + s.w), 0);
+  const maxY = Math.max(...sized.map((s) => s.y + s.h), 0);
+  const W = maxX + PAD * 2, H = maxY + PAD * 2 + 34;
+
+  const parts = [];
+  parts.push(`<rect width="${W}" height="${H}" fill="#070b14"/>`);
+  parts.push(
+    `<text x="${PAD}" y="${PAD - 8}" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="15" font-weight="700">${esc(meta.title)}</text>`,
+  );
+
+  // Parents before children so nesting reads correctly.
+  const depth = (n) => (n.parentId && byId.has(n.parentId) ? 1 + depth(byId.get(n.parentId)) : 0);
+  const ordered = [...sized].sort((a, b) =>
+    (a.n.type === "group" ? 0 : 1) - (b.n.type === "group" ? 0 : 1) || depth(a.n) - depth(b.n));
+
+  for (const s of ordered) {
+    const d = s.n.data ?? {};
+    const x = s.x + PAD, y = s.y + PAD;
+    if (s.n.type === "group") {
+      const dash = d.borderStyle === "dashed" ? ' stroke-dasharray="6 4"' : "";
+      parts.push(
+        `<rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="12" fill="${d.fill ?? "none"}" stroke="${d.stroke ?? "#475569"}" stroke-width="${d.borderWidth ?? 1.5}"${dash}/>`,
+      );
+      parts.push(`<circle cx="${x + 16}" cy="${y + 18}" r="3" fill="${d.stroke ?? "#475569"}"/>`);
+      parts.push(
+        `<text x="${x + 26}" y="${y + 22}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600">${esc(fitText(d.title, s.w - 40, 11.5))}</text>`,
+      );
+      if (d.subtitle) {
+        parts.push(
+          `<text x="${x + 26}" y="${y + 36}" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="10">${esc(fitText(d.subtitle, s.w - 40, 10))}</text>`,
+        );
+      }
+      continue;
+    }
+
+    const accent = d.accentColor ?? "#475569";
+    parts.push(
+      `<rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="8" fill="#0d1320" stroke="${accent}" stroke-width="${d.emphasised ? 2 : 1}"/>`,
+    );
+    const icon = meta.iconFor?.(s.n.id);
+    if (icon) parts.push(`<g transform="translate(${x + 12},${y + 12})">${icon}</g>`);
+    else {
+      parts.push(`<rect x="${x + 12}" y="${y + 12}" width="30" height="30" rx="5" fill="${accent}"/>`);
+      parts.push(
+        `<text x="${x + 27}" y="${y + 32}" text-anchor="middle" fill="#0b1220" font-family="ui-monospace,monospace" font-size="12" font-weight="700">${esc((d.label ?? "?").slice(0, 2))}</text>`,
+      );
+    }
+    const tx = x + 52, tw = s.w - 64;
+    parts.push(
+      `<text x="${tx}" y="${y + 25}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5">${esc(fitText((d.marker ?? "") + (d.name ?? ""), tw, 11.5))}</text>`,
+    );
+    parts.push(
+      `<text x="${tx}" y="${y + 39}" fill="#64748b" font-family="ui-monospace,monospace" font-size="9.5">${esc(fitText(d.label, tw, 9.5))}</text>`,
+    );
+  }
+
+  for (const e of edges ?? []) {
+    const a = sized.find((s) => s.n.id === e.source), b = sized.find((s) => s.n.id === e.target);
+    if (!a || !b) continue;
+    parts.push(
+      `<line x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" stroke="#475569" stroke-width="1.2"/>`,
+    );
+  }
+
+  parts.push(
+    `<text x="${PAD}" y="${H - 12}" fill="#475569" font-family="ui-monospace,monospace" font-size="10">${esc(meta.footer)}</text>`,
+  );
+
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n${parts.join("\n")}\n</svg>\n`;
+}
+
+/* ---------- resource detail panel ----------
+ * Opens on clicking a resource, closes on clicking empty canvas. Containers
+ * (VPC, AZ, subnet, service groups) are not selectable, so only actual
+ * resources can open it.
+ */
+function DetailPanel({ node, findings, onClose }) {
+  if (!node) return null;
+  const props = node.properties ?? {};
+  const keys = Object.keys(props).sort();
+  const mine = (findings ?? []).filter((f) => f.resource_key === node.id);
+
+  const fmt = (v) => {
+    if (v === null || v === undefined || v === "") return "—";
+    if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  };
+
+  return h("div", {
+    className: "absolute right-3 top-3 z-20 flex max-h-[calc(100%-1.5rem)] w-[380px] flex-col rounded-xl border border-white/10 bg-ink-900/95 shadow-2xl backdrop-blur",
+    // clicks inside must not reach the canvas and close the panel
+    onClick: (e) => e.stopPropagation(),
+  },
+    h("div", { className: "flex shrink-0 items-start gap-2.5 border-b border-white/10 px-4 py-3" },
+      node.icon ? h(node.icon, { width: 26, height: 26, style: { flexShrink: 0 } }) : null,
+      h("div", { className: "min-w-0 flex-1" },
+        h("div", { className: "truncate font-mono text-[13px] font-semibold text-slate-100" }, node.name || "—"),
+        h("div", { className: "font-mono text-[10px] uppercase tracking-wide text-slate-500" }, node.label),
+      ),
+      h("button", {
+        className: "shrink-0 rounded px-1.5 text-slate-500 hover:text-slate-200",
+        onClick: onClose, title: "close",
+      }, "✕"),
+    ),
+    h("div", { className: "min-h-0 flex-1 overflow-y-auto px-4 py-3" },
+      mine.length
+        ? h("div", { className: "mb-3" },
+            h("div", { className: "kpi-label pb-1.5" }, `findings (${mine.length})`),
+            mine.map((f, i) =>
+              h("div", { key: i, className: "mb-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-2" },
+                h("div", { className: "flex items-center gap-1.5" },
+                  h("span", { className: cx("sevbadge", (SEV[f.severity] ?? SEV.info).badge) }, f.severity),
+                  h("span", { className: "truncate font-mono text-[10.5px] text-slate-400" }, f.rule),
+                  f.suppressed ? h("span", { className: "chip" }, "accepted") : null,
+                ),
+                h("div", { className: "pt-1 text-[11.5px] leading-snug text-slate-300" }, f.message),
+              )
+            ),
+          )
+        : null,
+      h("div", { className: "kpi-label pb-1.5" }, "properties"),
+      keys.length
+        ? h("dl", { className: "space-y-1" },
+            keys.map((k) =>
+              h("div", { key: k, className: "flex gap-2 border-b border-white/5 py-1 last:border-0" },
+                h("dt", { className: "w-[44%] shrink-0 font-mono text-[10.5px] text-slate-500" }, k),
+                h("dd", { className: "min-w-0 flex-1 break-words font-mono text-[10.5px] text-slate-200" }, fmt(props[k])),
+              )
+            ),
+          )
+        : h("div", { className: "text-[11.5px] text-slate-500" }, "no properties collected"),
+      h("div", { className: "kpi-label pb-1.5 pt-3" }, "arn"),
+      h("div", { className: "break-all font-mono text-[10px] text-slate-400" }, node.id),
+    ),
+  );
+}
+
+function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, onPaneClick, detail, canExport, exportTitle, exportFooter }) {
   const { fitView } = useReactFlow();
   useEffect(() => {
     if (!nodes.length) return;
@@ -331,11 +930,42 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS }) {
     };
     const id = requestAnimationFrame(attempt);
     return () => { stopped = true; cancelAnimationFrame(id); };
-  }, [nodes.length, edges.length]);
-  return h("div", { className: "h-full w-full" },
+  }, [nodes.length, edges.length, viewKey]);
+  const exportSvg = () => {
+    // Icon glyphs are inline <svg> in each node; lift them so the export keeps
+    // the AWS iconography rather than falling back to lettered chips.
+    const iconFor = (id) => {
+      const el = document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"] svg`);
+      return el ? el.outerHTML : null;
+    };
+    const svg = architectureSvg(nodes, edges, {
+      title: exportTitle ?? "AWS architecture",
+      footer: exportFooter ?? "",
+      iconFor,
+    });
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(exportTitle ?? "architecture").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.svg`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  return h("div", { className: "relative h-full w-full" },
+    detail,
+    canExport
+      ? h("button", {
+          className: "toggle toggle-off absolute left-3 top-3 z-20",
+          onClick: exportSvg,
+          title: "Download this diagram as a standalone SVG",
+        }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), "SVG")
+      : null,
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
       edgesUpdatable: false, nodeTypes: NODE_TYPES, defaultEdgeOptions: { type: "default" },
+      onNodeClick, onPaneClick,
     },
       h(Background, { color: "#16213a" }),
       h(Controls, { style: { background: "#0d1320", color: "#9ca3af", borderColor: "#2a3550" } }),
@@ -1351,6 +1981,9 @@ function App() {
   const [jobs, setJobs] = useState(null);
   const [wsOk, setWsOk] = useState(false);
   const [showFindings, setShowFindings] = useState(false);
+  // Architecture is the default: the containment view is what people mean by
+  // "the diagram". Flow stays available for dependency tracing.
+  const [diagView, setDiagView] = useState("arch");
   const [findingGraph, setFindingGraph] = useState(null);
   const [snaps, setSnaps] = useState([]);
   const [showDiffOv, setShowDiffOv] = useState(false);
@@ -1569,6 +2202,18 @@ function App() {
         pane("diagram",
           h("div", { className: "flex h-full min-h-0 flex-col" },
             h("div", { className: "flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2" },
+              h("div", { className: "flex items-center gap-1 rounded-lg border border-white/10 p-0.5" },
+                ["arch", "flow"].map((v) =>
+                  h("button", {
+                    key: v,
+                    className: cx("toggle border-0", diagView === v ? "toggle-on" : "toggle-off"),
+                    onClick: () => setDiagView(v),
+                    title: v === "arch"
+                      ? "AWS architecture view — VPC and subnet boundaries, resources nested inside"
+                      : "Flow view — dependency graph, laid out left to right",
+                  }, v === "arch" ? "architecture" : "flow")
+                ),
+              ),
               h("button", { className: cx("toggle", showFindings ? "toggle-on" : "toggle-off"), onClick: toggleFindings },
                 h(Icon, { name: "alert", className: "h-3.5 w-3.5" }), "findings"),
               h("button", { className: cx("toggle", showDiffOv ? "toggle-on" : "toggle-off"), onClick: toggleDiffOv },
@@ -1593,7 +2238,14 @@ function App() {
                 : null,
             ),
             h("div", { className: "min-h-0 flex-1" },
-              h(Diagram, { graph, findingsGraph: showFindings ? findingGraph : null, diffOverlay: showDiffOv ? diffOv : null })),
+              h(Diagram, {
+                graph,
+                findingsGraph: showFindings ? findingGraph : null,
+                diffOverlay: showDiffOv ? diffOv : null,
+                view: diagView,
+                region: (summary?.regions ?? [])[0],
+                findings: findings?.findings ?? [],
+              })),
           ),
         ),
         pane("findings", h(Findings, { data: findings, sev: findingSev, setSev: setFindingSev, onAsk: askAbout })),

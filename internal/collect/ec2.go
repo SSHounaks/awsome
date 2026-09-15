@@ -49,6 +49,20 @@ func emitInstance(a acc, inst types.Instance, emit *Emitter) {
 	if inst.State != nil && inst.State.Name != "" {
 		n.Properties["state"] = string(inst.State.Name)
 	}
+	if inst.Placement != nil {
+		n.Properties["az"] = aws.ToString(inst.Placement.AvailabilityZone)
+	}
+	// Instance Metadata Service settings. IMDSv1 ("optional") lets any SSRF in an
+	// application read the instance role's credentials with a plain GET; IMDSv2
+	// ("required") needs a PUT to obtain a token, which SSRF generally cannot do.
+	if inst.MetadataOptions != nil {
+		n.Properties["imds_tokens"] = string(inst.MetadataOptions.HttpTokens)
+		n.Properties["imds_endpoint"] = string(inst.MetadataOptions.HttpEndpoint)
+		if inst.MetadataOptions.HttpPutResponseHopLimit != nil {
+			n.Properties["imds_hop_limit"] = int(*inst.MetadataOptions.HttpPutResponseHopLimit)
+		}
+	}
+	n.Properties["has_instance_profile"] = inst.IamInstanceProfile != nil
 	if inst.IamInstanceProfile != nil {
 		if arn := aws.ToString(inst.IamInstanceProfile.Arn); arn != "" {
 			emit.Send(a.edge(n.Key, arn, "USES_PROFILE"))

@@ -33,6 +33,7 @@ func emitRedshiftCluster(a acc, c types.Cluster, emit *Emitter) {
 	n := a.now()
 	n.Label = "REDSHIFT"
 	n.Key = fmt.Sprintf("arn:%s:redshift:%s:%s:cluster:%s", a.partition, a.region, a.accountID, id)
+	n.Name = id
 	n.Properties = map[string]any{
 		"node_type": aws.ToString(c.NodeType),
 		"status":    aws.ToString(c.ClusterStatus),

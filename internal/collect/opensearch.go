@@ -38,6 +38,7 @@ func emitOpenSearchDomain(a acc, st *types.DomainStatus, emit *Emitter) {
 	n := a.now()
 	n.Label = "OPENSEARCH"
 	n.Key = fmt.Sprintf("arn:%s:es:%s:%s:domain/%s", a.partition, a.region, a.accountID, name)
+	n.Name = name
 	n.Properties = map[string]any{
 		"engine_version":           aws.ToString(st.EngineVersion),
 		"dedicated_master_enabled": false,

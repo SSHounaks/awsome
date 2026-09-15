@@ -5,10 +5,27 @@ import "sort"
 var severityRank = map[string]int{"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
 
 var ruleOrder = []func(*Graph) []Finding{
-	ruleS3PublicBucket,
-	ruleOpenIngress,
+	// identity first: credential and trust failures are the shortest path in
+	ruleRootAccount,
+	rulePasswordPolicy,
+	ruleIamUserCredentials,
 	ruleIamWildcardAdmin,
 	ruleIamTrustWildcard,
+	ruleIamExternalTrust,
+	// workload credential theft
+	ruleImdsV1,
+	ruleLambdaEnvSecret,
+	ruleLambdaRuntime,
+	// exposure
+	ruleS3PublicBucket,
+	ruleOpenIngress,
+	ruleSgOpenEgress,
+	ruleEksPublicEndpoint,
+	rulePublicInstance,
+	// data protection
+	ruleS3Hardening,
+	ruleRdsHardening,
+	ruleEcrHardening,
 	ruleCrossEnvEdge,
 	ruleUnencryptedStorage,
 	ruleUnassociatedResources,

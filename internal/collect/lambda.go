@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
@@ -45,6 +46,19 @@ func emitFunction(a acc, fn types.FunctionConfiguration, vpc *types.VpcConfigRes
 		"last_modified": aws.ToString(fn.LastModified),
 		"package_type":  string(fn.PackageType),
 	}
+	n.Name = name
+	// Environment variable NAMES only. The values are exactly the secrets this
+	// scanner is meant to flag, and writing them into snapshots/ on disk would
+	// turn the audit tool into the leak.
+	if fn.Environment != nil && len(fn.Environment.Variables) > 0 {
+		keys := make([]string, 0, len(fn.Environment.Variables))
+		for k := range fn.Environment.Variables {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		n.Properties["env_var_names"] = keys
+	}
+	n.Properties["in_vpc"] = vpc != nil && aws.ToString(vpc.VpcId) != ""
 	emit.Send(n)
 
 	if vpc == nil {

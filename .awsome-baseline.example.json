@@ -1,0 +1,18 @@
+{
+  "_comment": "Accepted-risk baseline. Suppressed findings are still written to findings.json with suppressed=true; they are only removed from the severity counts. Copy to .awsome-baseline.json (gitignored) and edit.",
+  "suppressions": [
+    {
+      "rule": "s3-public-bucket",
+      "resource": "*-static-site",
+      "reason": "Static site assets are designed for anonymous browser delivery; grant is s3:GetObject only with no s3:ListBucket, so keys cannot be enumerated.",
+      "owner": "platform-team",
+      "expires": "2026-12-31"
+    },
+    {
+      "rule": "sg-orphan",
+      "reason": "Retained during migration; removal tracked in INFRA-1234.",
+      "owner": "infra",
+      "expires": "2026-10-31"
+    }
+  ]
+}

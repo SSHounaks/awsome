@@ -33,6 +33,7 @@ func emitCacheCluster(a acc, cc types.CacheCluster, emit *Emitter) {
 	n := a.now()
 	n.Label = "ELASTICACHE"
 	n.Key = fmt.Sprintf("arn:%s:elasticache:%s:%s:cluster:%s", a.partition, a.region, a.accountID, id)
+	n.Name = id
 	n.Properties = map[string]any{
 		"engine":          aws.ToString(cc.Engine),
 		"cache_node_type": aws.ToString(cc.CacheNodeType),

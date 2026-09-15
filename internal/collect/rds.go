@@ -33,6 +33,7 @@ func emitRdsInstance(a acc, inst types.DBInstance, emit *Emitter) {
 	n := a.now()
 	n.Label = "RDS"
 	n.Key = fmt.Sprintf("arn:%s:rds:%s:%s:db:%s", a.partition, a.region, a.accountID, id)
+	n.Name = id
 	n.Properties = map[string]any{
 		"engine":              aws.ToString(inst.Engine),
 		"engine_version":      aws.ToString(inst.EngineVersion),
@@ -48,6 +49,30 @@ func emitRdsInstance(a acc, inst types.DBInstance, emit *Emitter) {
 	}
 	if inst.StorageEncrypted != nil {
 		n.Properties["encrypted"] = *inst.StorageEncrypted
+	}
+	if inst.BackupRetentionPeriod != nil {
+		n.Properties["backup_retention_days"] = int(*inst.BackupRetentionPeriod)
+	}
+	// Read replicas report a retention of 0 by design — backups are taken on the
+	// source instance — so rules must not read that as "backups disabled".
+	if src := aws.ToString(inst.ReadReplicaSourceDBInstanceIdentifier); src != "" {
+		n.Properties["read_replica_source"] = src
+	}
+	n.Properties["is_read_replica"] = aws.ToString(inst.ReadReplicaSourceDBInstanceIdentifier) != ""
+	if inst.DeletionProtection != nil {
+		n.Properties["deletion_protection"] = *inst.DeletionProtection
+	}
+	if inst.AutoMinorVersionUpgrade != nil {
+		n.Properties["auto_minor_version_upgrade"] = *inst.AutoMinorVersionUpgrade
+	}
+	if inst.IAMDatabaseAuthenticationEnabled != nil {
+		n.Properties["iam_auth"] = *inst.IAMDatabaseAuthenticationEnabled
+	}
+	if inst.PerformanceInsightsEnabled != nil {
+		n.Properties["performance_insights"] = *inst.PerformanceInsightsEnabled
+	}
+	if len(inst.EnabledCloudwatchLogsExports) > 0 {
+		n.Properties["log_exports"] = inst.EnabledCloudwatchLogsExports
 	}
 	if inst.Endpoint != nil {
 		port := ""
@@ -96,6 +121,7 @@ func emitRdsSubnetGroup(a acc, sg types.DBSubnetGroup, emit *Emitter) {
 	n := a.now()
 	n.Label = "DBSG"
 	n.Key = fmt.Sprintf("arn:%s:rds:%s:%s:subgrp:%s", a.partition, a.region, a.accountID, name)
+	n.Name = name
 	n.Properties = map[string]any{
 		"vpc_id":      aws.ToString(sg.VpcId),
 		"status":      aws.ToString(sg.SubnetGroupStatus),
