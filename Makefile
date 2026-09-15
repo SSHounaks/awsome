@@ -41,11 +41,18 @@ neo4j-load:
 	$(eval SNAP := $(shell ls -td snapshots/*/ 2>/dev/null | head -1))
 	$(if $(SNAP),$(GO) run ./cmd/awsome-neo4j --dir $(SNAP),@echo "no snapshot yet — run make scan first")
 
-TW := .tools/tailwindcss
+# Tailwind v4 CLI: prefer the standalone binary if it was downloaded, otherwise
+# fall back to the npm package (`npm install --no-save tailwindcss@4 @tailwindcss/cli@4`).
+# v4 auto-detects sources from the input stylesheet's directory, so --content
+# (a v3 flag) is not needed.
+TW := $(firstword $(wildcard .tools/tailwindcss node_modules/.bin/tailwindcss))
 
 tw:
-	$(if $(wildcard $(TW)),,$(shell echo "download .tools/tailwindcss first" >&2 && exit 1))
-	$(TW) -i web/styles.src.css -o web/styles.css --minify --content ./web/app.js --content ./web/index.html --content ./web/styles.src.css
+	@if [ -z "$(TW)" ]; then \
+		echo "no tailwind CLI found — run: npm install --no-save tailwindcss@4 @tailwindcss/cli@4" >&2; \
+		exit 1; \
+	fi
+	$(TW) -i web/styles.src.css -o web/styles.css --minify
 
 web: tw
 	@mise x -- bash -lc 'deno run --allow-net --allow-read=. --allow-run=bash,kill,setsid,opencode,pgrep --allow-write=/tmp/awsome --allow-env api/main.ts'
