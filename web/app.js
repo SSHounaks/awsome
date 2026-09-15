@@ -217,13 +217,15 @@ const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", l
  */
 const AwsNode = React.memo(function AwsNode({ data }) {
   const Icon = data.icon;
+  // Fills the box the layout allocated. Sizing to content instead made every
+  // node a different width, so a fixed-grid layout could never line up: wide
+  // ones overlapped their neighbour and pushed through the container border.
   return h("div", {
-    className: "flex items-center gap-2.5 rounded-lg border px-3 py-2 shadow-lg",
+    className: "flex h-full w-full items-center gap-2.5 overflow-hidden rounded-lg border px-3 shadow-lg",
     style: {
       background: "#0d1320",
       borderColor: data.accentColor ?? "#475569",
       borderWidth: data.emphasised ? 2 : 1,
-      minWidth: 188,
     },
     title: data.title,
   },
@@ -234,10 +236,10 @@ const AwsNode = React.memo(function AwsNode({ data }) {
           className: "flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded font-mono text-[13px] font-bold",
           style: { background: data.accentColor ?? "#334155", color: "#0b1220" },
         }, (data.label ?? "?").slice(0, 2)),
-    h("div", { className: "min-w-0 leading-tight" },
-      h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100", style: { maxWidth: 150 } },
+    h("div", { className: "min-w-0 flex-1 leading-tight" },
+      h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100" },
         (data.marker ?? "") + (data.name ?? "")),
-      h("div", { className: "font-mono text-[9.5px] uppercase tracking-wide text-slate-500" }, data.label),
+      h("div", { className: "truncate font-mono text-[9.5px] uppercase tracking-wide text-slate-500" }, data.label),
     ),
     h(Handle, { type: "source", position: Position.Right, style: { opacity: 0, width: 1, height: 1 } }),
   );
@@ -282,9 +284,9 @@ const NODE_TYPES = { aws: AwsNode, group: GroupBox };
 
 /* layout geometry */
 const A_NODE_W = 208, A_NODE_H = 54, A_GAP = 12;
-const A_SUB_PADX = 12, A_SUB_HEAD = 44, A_SUB_PADB = 12, A_SUB_COLS = 2;
-const A_AZ_PADX = 12, A_AZ_HEAD = 30, A_AZ_PADB = 12;
-const A_VPC_PADX = 18, A_VPC_HEAD = 52, A_VPC_PADB = 18;
+const A_SUB_PADX = 12, A_SUB_HEAD = 58, A_SUB_PADB = 12, A_SUB_COLS = 2;
+const A_AZ_PADX = 12, A_AZ_HEAD = 44, A_AZ_PADB = 12;
+const A_VPC_PADX = 18, A_VPC_HEAD = 60, A_VPC_PADB = 18;
 const A_LANE_COLS = 8;
 
 // An architecture diagram shows workloads and boundaries. Security groups,
@@ -402,6 +404,10 @@ function layoutArchitecture(graph, opts) {
     out.push({
       id: n.id, type: "aws", parentId, extent: parentId ? "parent" : undefined,
       position: { x, y },
+      // Explicit size: the layout reserves exactly this much room, so the node
+      // must occupy exactly this much and no more.
+      style: { width: A_NODE_W, height: A_NODE_H },
+      width: A_NODE_W, height: A_NODE_H,
       data: {
         // RDS/ElastiCache ARNs are colon-separated, so a "/" split returns the
         // whole ARN. Fall back through both separators.
@@ -592,6 +598,9 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region }) {
       const marker = ov === "add" ? "+ " : ov === "mod" ? "~ " : "";
       return {
         id: n.id, type: "aws",
+        // matches the box dagre reserves in layoutGraph
+        style: { width: 210, height: 56 },
+        width: 210, height: 56,
         data: {
           name,
           label: n.label,
