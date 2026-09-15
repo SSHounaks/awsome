@@ -30,6 +30,20 @@ func ruleS3PublicBucket(g *Graph) []Finding {
 				anon, conditioned := anonymousPolicyGrant(policy)
 				if anon {
 					how = "bucket policy grants anonymous principals"
+					// What the anonymous grant actually permits matters more than
+					// that it exists. Read-only access to object keys you already
+					// know is how every static website works; the ability to list
+					// the bucket (enumerate everything) or write to it is not.
+					switch scope := anonymousGrantScope(policy); {
+					case scope.write:
+						how += " with WRITE access"
+					case scope.list:
+						how += " that can list bucket contents"
+						sev = "high"
+					default:
+						how += " read-only (s3:GetObject, no s3:ListBucket, so object keys cannot be enumerated)"
+						sev = "medium"
+					}
 					if conditioned {
 						// e.g. Principal:"*" scoped to CloudFront edge IPs — a
 						// wildcard principal, but not world-reachable.
@@ -87,6 +101,48 @@ func anonymousPolicyGrant(policy string) (anon bool, allConditioned bool) {
 		return false, false
 	}
 	return true, allConditioned
+}
+
+// grantScope describes what an anonymous grant actually permits.
+type grantScope struct {
+	list  bool // can enumerate object keys (s3:ListBucket)
+	write bool // can modify or delete objects
+}
+
+// anonymousGrantScope inspects the actions granted to wildcard principals. A
+// public bucket serving a static site (GetObject only) is a different risk from
+// one that can be listed or written to.
+func anonymousGrantScope(policy string) grantScope {
+	var doc struct {
+		Statement []struct {
+			Effect    string          `json:"Effect"`
+			Principal json.RawMessage `json:"Principal"`
+			Action    json.RawMessage `json:"Action"`
+		} `json:"Statement"`
+	}
+	var scope grantScope
+	if err := json.Unmarshal([]byte(policy), &doc); err != nil {
+		// Cannot tell — assume the worst rather than under-reporting.
+		return grantScope{list: true, write: true}
+	}
+	for _, st := range doc.Statement {
+		if !strings.EqualFold(st.Effect, "Allow") || !wildcardPrincipal(st.Principal) {
+			continue
+		}
+		for _, a := range jsonStrings(st.Action) {
+			lower := strings.ToLower(a)
+			switch {
+			case lower == "*" || lower == "s3:*":
+				scope.list, scope.write = true, true
+			case strings.HasPrefix(lower, "s3:list"):
+				scope.list = true
+			case strings.HasPrefix(lower, "s3:put"), strings.HasPrefix(lower, "s3:delete"),
+				strings.HasPrefix(lower, "s3:restore"), strings.Contains(lower, "acl"):
+				scope.write = true
+			}
+		}
+	}
+	return scope
 }
 
 // wildcardPrincipal matches both `"Principal": "*"` and

@@ -178,6 +178,80 @@ func TestAnonymousPolicyGrant(t *testing.T) {
 	}
 }
 
+func TestAnonymousGrantScope(t *testing.T) {
+	cases := []struct {
+		name      string
+		policy    string
+		wantList  bool
+		wantWrite bool
+	}{
+		{
+			// The static-website pattern: readable only if you know the key.
+			name:   "GetObject only",
+			policy: `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject"}]}`,
+		},
+		{
+			name:     "ListBucket allows enumeration",
+			policy:   `{"Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:ListBucket"]}]}`,
+			wantList: true,
+		},
+		{
+			name:      "PutObject is write access",
+			policy:    `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:PutObject"}]}`,
+			wantWrite: true,
+		},
+		{
+			name:      "s3:* is everything",
+			policy:    `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:*"}]}`,
+			wantList:  true,
+			wantWrite: true,
+		},
+		{
+			// Actions granted to a named principal are not anonymous access.
+			name:   "write granted to a named principal is ignored",
+			policy: `{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::1:root"},"Action":"s3:PutObject"}]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := anonymousGrantScope(tc.policy)
+			if got.list != tc.wantList || got.write != tc.wantWrite {
+				t.Errorf("scope = %+v, want list=%v write=%v", got, tc.wantList, tc.wantWrite)
+			}
+		})
+	}
+}
+
+func TestS3PublicBucketSeverityFollowsWhatIsGranted(t *testing.T) {
+	mk := func(key, policy string) model.Node {
+		return model.Node{
+			Label: "S3BUCKET", Key: key, Name: key,
+			Properties: map[string]any{"bucket_policy": policy},
+		}
+	}
+	g := graphOf(
+		mk("static-site", `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::b/*"}]}`),
+		mk("listable", `{"Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject","s3:ListBucket"]}]}`),
+		mk("writable", `{"Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:PutObject"}]}`),
+	)
+
+	got := map[string]string{}
+	for _, f := range ruleS3PublicBucket(g) {
+		got[f.ResourceKey] = f.Severity
+	}
+
+	if got["static-site"] != "medium" {
+		t.Errorf("read-only public bucket = %q, want medium", got["static-site"])
+	}
+	if got["listable"] != "high" {
+		t.Errorf("listable public bucket = %q, want high", got["listable"])
+	}
+	if got["writable"] != "critical" {
+		t.Errorf("writable public bucket = %q, want critical", got["writable"])
+	}
+}
+
 func TestIngressSeverity(t *testing.T) {
 	cases := []struct {
 		name string
