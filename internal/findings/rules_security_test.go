@@ -182,8 +182,25 @@ func TestExternalTrustAccounts(t *testing.T) {
 			wantExt: 0,
 		},
 		{
-			name:    "external account, no condition",
+			name:    "external account root, no condition",
 			policy:  `{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:root"},"Action":"sts:AssumeRole"}]}`,
+			wantExt: 1,
+		},
+		{
+			// Naming one external role IS the scoping; it must not be reported as
+			// unscoped cross-account trust.
+			name:    "external but scoped to a specific role ARN",
+			policy:  `{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:role/upload-handler"},"Action":"sts:AssumeRole"}]}`,
+			wantExt: 0,
+		},
+		{
+			name:    "external but scoped to a specific user ARN",
+			policy:  `{"Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::999999999999:user/ci"},"Action":"sts:AssumeRole"}]}`,
+			wantExt: 0,
+		},
+		{
+			name:    "bare account id is equivalent to root",
+			policy:  `{"Statement":[{"Effect":"Allow","Principal":{"AWS":"999999999999"},"Action":"sts:AssumeRole"}]}`,
 			wantExt: 1,
 		},
 		{

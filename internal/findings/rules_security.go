@@ -176,16 +176,29 @@ func ruleIamExternalTrust(g *Graph) []Finding {
 			name = n.Key
 		}
 		out = append(out, nfEv(n, "iam-cross-account-trust", "high", "iam",
-			fmt.Sprintf("Role %s can be assumed by external account(s) %s with no Condition",
+			fmt.Sprintf("Role %s can be assumed by ANY principal in external account(s) %s — the trust names the account root, not a specific role, and carries no Condition",
 				name, strings.Join(externals, ", ")),
-			"Add an ExternalId or aws:PrincipalOrgID condition, or scope the trust to specific role ARNs",
+			"Name the specific external role ARN that needs to assume this role, or add an aws:PrincipalOrgID / ExternalId condition",
 			map[string]any{"external_accounts": externals}))
 	}
 	return out
 }
 
-// externalTrustAccounts returns the AWS account IDs outside selfAccount that can
-// assume the role, and whether every statement granting them is Condition-scoped.
+// trustPrincipal is one AWS principal in a trust policy.
+type trustPrincipal struct {
+	account string
+	// scoped is true when the principal names a specific role or user. Naming
+	// one role ARN is the tightest form of cross-account trust there is — it is
+	// what "scope the trust" means — so it must not be reported as unscoped.
+	// Only ":root" or a bare account id lets *any* principal in that account
+	// assume the role.
+	scoped bool
+}
+
+// externalTrustAccounts returns the AWS accounts outside selfAccount that can
+// assume the role via an *unscoped* principal and without a Condition. A trust
+// naming a specific external role ARN is already correctly constrained and is
+// not returned.
 func externalTrustAccounts(policy, selfAccount string) (accounts []string, allConditioned bool) {
 	var doc iamDoc
 	if json.Unmarshal([]byte(policy), &doc) != nil {
@@ -198,10 +211,11 @@ func externalTrustAccounts(policy, selfAccount string) (accounts []string, allCo
 			continue
 		}
 		var external []string
-		for _, id := range principalAccountIDs(st.Principal) {
-			if id != "" && id != selfAccount {
-				external = append(external, id)
+		for _, p := range principalAccounts(st.Principal) {
+			if p.account == "" || p.account == selfAccount || p.scoped {
+				continue
 			}
+			external = append(external, p.account)
 		}
 		if len(external) == 0 {
 			continue
@@ -220,27 +234,29 @@ func externalTrustAccounts(policy, selfAccount string) (accounts []string, allCo
 	return accounts, allConditioned
 }
 
-// principalAccountIDs pulls account IDs out of the "AWS" key of a Principal
-// block, which may be a bare account ID or a full ARN, singular or a list.
-func principalAccountIDs(raw json.RawMessage) []string {
+// principalAccounts pulls principals out of the "AWS" key of a Principal block,
+// which may be a bare account id or a full ARN, singular or a list.
+func principalAccounts(raw json.RawMessage) []trustPrincipal {
 	if len(raw) == 0 {
 		return nil
 	}
-	var out []string
+	var out []trustPrincipal
 	add := func(s string) {
 		if s == "" || s == "*" {
 			return
 		}
 		if strings.HasPrefix(s, "arn:") {
 			parts := strings.Split(s, ":")
-			if len(parts) >= 5 {
-				out = append(out, parts[4])
+			if len(parts) < 6 {
+				return
 			}
+			// parts[5] is "root" for the account principal, or "role/x", "user/x".
+			out = append(out, trustPrincipal{account: parts[4], scoped: parts[5] != "root"})
 			return
 		}
-		// A bare 12-digit account id.
+		// A bare 12-digit account id is equivalent to :root.
 		if len(s) == 12 && strings.Trim(s, "0123456789") == "" {
-			out = append(out, s)
+			out = append(out, trustPrincipal{account: s})
 		}
 	}
 
