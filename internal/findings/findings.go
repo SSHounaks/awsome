@@ -15,4 +15,10 @@ type Finding struct {
 	Message       string         `json:"message"`
 	Remediation   string         `json:"remediation"`
 	Evidence      map[string]any `json:"evidence,omitempty"`
+
+	// Set when a baseline entry accepts this risk. The finding is still emitted
+	// so an accepted risk stays visible and reviewable.
+	Suppressed        bool   `json:"suppressed,omitempty"`
+	SuppressionReason string `json:"suppression_reason,omitempty"`
+	SuppressionOwner  string `json:"suppression_owner,omitempty"`
 }

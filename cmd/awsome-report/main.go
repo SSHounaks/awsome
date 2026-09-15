@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"awsome/internal/findings"
 	"awsome/internal/inspect"
@@ -13,6 +14,7 @@ import (
 
 func main() {
 	dir := flag.String("dir", "", "snapshot directory (default: latest under ./snapshots)")
+	baselinePath := flag.String("baseline", ".awsome-baseline.json", "accepted-risk baseline file (missing file = no suppressions)")
 	flag.Parse()
 
 	if *dir == "" {
@@ -36,13 +38,29 @@ func main() {
 	}
 
 	fns := findings.Run(g)
+
+	baseline, err := findings.LoadBaseline(*baselinePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "baseline:", err)
+		os.Exit(1)
+	}
+	fns, suppressed, expired := baseline.Apply(fns, time.Now())
+
 	outPath := filepath.Join(*dir, "findings.json")
 	if err := inspect.WriteJSON(outPath, fns); err != nil {
 		fmt.Fprintln(os.Stderr, "write findings:", err)
 		os.Exit(1)
 	}
 
-	printSummary(fns, outPath)
+	printSummary(findings.Active(fns), outPath)
+
+	if suppressed > 0 {
+		fmt.Printf("  suppressed %d accepted-risk finding(s) via %s (still recorded in findings.json)\n", suppressed, *baselinePath)
+	}
+	for _, s := range expired {
+		fmt.Printf("  EXPIRED suppression %s/%s (owner %s, expired %s) — finding is live again\n",
+			s.Rule, s.Resource, s.Owner, s.Expires)
+	}
 }
 
 func latestSnapshotDir(root string) (string, error) {

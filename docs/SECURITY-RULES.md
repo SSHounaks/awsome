@@ -207,6 +207,50 @@ of which roughly half were noise:
    cannot act on is noise with a severity attached.
 6. **Never collect a secret to report on it.** Record that a secret-shaped
    environment variable exists; never record its value.
+7. **A specific ARN is already the scoping.** `iam-cross-account-trust` first
+   flagged every trust naming an external account, including ones scoped to a
+   single role ARN — while its own remediation text advised "scope the trust to
+   specific role ARNs". Two of four findings on a real account were that bug.
+   Only `:root` or a bare account id lets *any* principal in that account assume
+   the role; that is the condition worth reporting.
+8. **Grade by what is granted, not that something is granted.** A bucket policy
+   allowing anonymous `s3:GetObject` with no `s3:ListBucket` is how every static
+   site works — keys cannot be enumerated. That is not the same risk as public
+   `ListBucket` (enumeration) or public `PutObject` (write), and one severity for
+   all three is wrong.
+
+## Accepted risk
+
+Some findings are correct and still not defects. A branch-preview bucket serving
+public static assets is working as designed.
+
+`awsome-report --baseline .awsome-baseline.json` records those decisions:
+
+```json
+{ "suppressions": [ {
+    "rule": "s3-public-bucket",
+    "resource": "*-branch-previews",
+    "reason": "static bundles, GetObject only, no ListBucket",
+    "owner": "platform-team",
+    "expires": "2026-12-31"
+} ] }
+```
+
+Three deliberate constraints:
+
+- **`reason` and `owner` are required.** An exception with no justification and
+  nobody's name on it is indistinguishable from a bug.
+- **`expires` brings the finding back.** An accepted risk that never gets
+  re-reviewed is just a risk. Expired entries are reported by name so they get
+  renewed or removed.
+- **Nothing is deleted.** Suppressed findings still appear in `findings.json`
+  with `suppressed: true` and the reason attached; they are only removed from the
+  severity counts. An accepted risk you can no longer see is one nobody will
+  revisit.
+
+Keep the real baseline out of a public repository — it names live resources.
+`.awsome-baseline.example.json` is the template; `.awsome-baseline.json` is
+gitignored.
 
 ## Coverage gaps
 
