@@ -50,7 +50,21 @@ function textOf(content: Anthropic.Beta.BetaContentBlock[]): string {
     .trim();
 }
 
+// Fail fast when no key is present. Without this the SDK falls back to looking
+// for an `ant auth login` profile under ~/.config/anthropic, which the server's
+// --allow-read=. sandbox denies — surfacing a Deno permission error instead of
+// the real problem, which is simply that no credential is configured.
+function missingCredential(): string | null {
+  const key = (Deno.env.get("ANTHROPIC_API_KEY") ?? Deno.env.get("ANTHROPIC_AUTH_TOKEN") ?? "").trim();
+  if (key) return null;
+  return "no ANTHROPIC_API_KEY in the server environment — export it and restart the web server " +
+    "(the process reads its environment at startup, so exporting it in another shell has no effect)";
+}
+
 export async function askAnthropic(system: string, user: string, timeoutMs: number): Promise<string> {
+  const missing = missingCredential();
+  if (missing) throw new Error(missing);
+
   const model = anthropicModelName();
   const opts = timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
 
@@ -95,6 +109,15 @@ export async function askAnthropic(system: string, user: string, timeoutMs: numb
 // Most-specific-first, so the caller's note says what actually went wrong rather
 // than a generic failure.
 function describe(e: unknown): Error {
+  // Deno denied a read the SDK attempted while resolving credentials. Safety net
+  // behind missingCredential(); reachable if a key is set but the SDK still
+  // probes the profile directory.
+  if (e instanceof Deno.errors.NotCapable) {
+    return new Error(
+      "credential lookup blocked by the server sandbox — set ANTHROPIC_API_KEY, " +
+        "or grant the server read access to ~/.config/anthropic to use an `ant auth login` profile",
+    );
+  }
   if (e instanceof Anthropic.AuthenticationError) {
     return new Error("ANTHROPIC_API_KEY missing or invalid");
   }
