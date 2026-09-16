@@ -97,6 +97,7 @@ Two ways to interrogate the graph in natural language:
 | provider | backend | env |
 | --- | --- | --- |
 | `heuristic` | offline deterministic QA (always available) | — |
+| `anthropic` | **Claude via the Anthropic API** (official SDK) | `ANTHROPIC_API_KEY`, `AWSOME_ANTHROPIC_MODEL` (default `claude-opus-5`), `AWSOME_ANTHROPIC_EFFORT` (default `medium`), `AWSOME_ANTHROPIC_FALLBACKS` |
 | `bedrock` | Amazon Bedrock Claude (SigV4-signed, needs creds) | `AWSOME_BEDROCK_REGION`, `AWSOME_BEDROCK_MODEL`, `AWS_*` creds |
 | `openrouter` | OpenAI-compatible router | `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (default `openrouter/auto`), `OPENROUTER_BASE_URL` |
 | `opencode` | your **local opencode agent** (headless `opencode serve`) | `OPENCODE_URL` (default `http://127.0.0.1:4096`), `OPENCODE_SERVER_PASSWORD`, `OPENCODE_MODEL` |
@@ -115,12 +116,54 @@ curl -s http://127.0.0.1:8000/api/chat -d '{"question":"tell me about awsome-dem
 
 AWSome POSTs the retrieved context to a fresh session, waits for the agent turn, and renders its answer (verified live end-to-end).
 
+### Claude via the Anthropic API
+
+`anthropic` talks to `api.anthropic.com` with the official SDK. This is different
+from `bedrock`, which reaches Claude through Amazon Bedrock with SigV4 and needs
+Bedrock model access in the account's region — GovCloud regions generally do not
+have it.
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+AWSOME_CHAT_PROVIDER=anthropic make web
+# or pick "anthropic" from the Ask tab's provider dropdown
+```
+
+Effort defaults to `medium` rather than the platform default of `high`: answers
+are short, grounded in retrieved context, and rendered in a panel while the user
+waits. Raise it with `AWSOME_ANTHROPIC_EFFORT=high` for harder questions.
+
+Server-side refusal fallbacks are on by default. Posture questions ("is anything
+publicly exposed?", "how would an attacker reach this bucket?") are exactly the
+shape a safety classifier can decline, and a fallback re-serves the request on
+another model inside the same call. Disable with `AWSOME_ANTHROPIC_FALLBACKS=off`.
+Like every non-heuristic provider it degrades to the offline rules with a visible
+note if the key is missing or the API is unreachable.
+
 **MCP server** — a Model Context Protocol stdio server exposing the graph & findings to any MCP client (7 tools: `graph_summary`, `list_findings`, `get_resource`, `list_finding_nodes`, `list_snapshots`, `start_scan`, `list_jobs`):
 
 ```sh
 make mcp                 # requires a MCP client to drive stdio
-mise x -- bash -lc 'deno run --allow-net --allow-read=. --allow-env scripts/test-mcp.ts'   # self-test handshake + tool calls
+mise x -- bash -lc 'deno run --allow-net --allow-read=. --allow-env --allow-run scripts/test-mcp.ts'   # self-test handshake + tool calls
 ```
+
+**Connecting Claude Code to this project.** The MCP server is how you point Claude
+at the graph. Add it as a project-scoped server (`.mcp.json` in the repo root):
+
+```json
+{
+  "mcpServers": {
+    "awsome": {
+      "command": "deno",
+      "args": ["run", "--allow-net", "--allow-read=.", "--allow-env", "api/mcp_server.ts"]
+    }
+  }
+}
+```
+
+Claude can then call `graph_summary`, `list_findings`, `get_resource` and
+`start_scan` directly. Neo4j must be running (`make neo4j-up && make neo4j-load`);
+verify the handshake first with the self-test below.
 
 Implementation lives in `api/mcp_server.ts` (JSON-RPC 2.0 over stdio, `Content-Length` framing) and `api/ai/` (`retrieval.ts` builds context, `heuristic.ts` offline QA, `bedrock.ts` += `sigv4.ts` SigV4-signs the Anthropic invoke call). `make check-web` type-checks everything.
 

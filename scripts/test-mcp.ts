@@ -8,7 +8,9 @@ const rpc = (id: number, method: string, params?: unknown): string => {
   return `Content-Length: ${JSON.stringify(msg).length}\r\n\r\n${JSON.stringify(msg)}`;
 };
 
-const proc = new Deno.Command("/home/shalnark/.deno/bin/deno", {
+// Deno.execPath() is the interpreter already running this script, so the test
+// works on any machine. This was hardcoded to one developer's home directory.
+const proc = new Deno.Command(Deno.execPath(), {
   args: ["run", "--allow-net", "--allow-read=.", "--allow-env", "api/mcp_server.ts"],
   cwd: repoRoot,
   stdin: "piped",
@@ -79,8 +81,14 @@ for (const f of frames) {
   }
   if (m.id === 5) {
     const txt = m.result?.content?.[0]?.text ?? "";
-    const d = JSON.parse(txt);
-    console.log("get_resource ->", d.node?.name ?? "ERR", "findings:", (d.affected ?? []).length);
+    // get_resource answers with a plain-text message when the key is absent, so
+    // the probe key not existing in this account is a valid result, not a crash.
+    try {
+      const d = JSON.parse(txt);
+      console.log("get_resource ->", d.node?.name ?? "ERR", "findings:", (d.affected ?? []).length);
+    } catch {
+      console.log("get_resource ->", txt.slice(0, 80));
+    }
   }
 }
 Deno.exit(0);

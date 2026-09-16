@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "awsome": {
+      "command": "mise",
+      "args": [
+        "x",
+        "--",
+        "deno",
+        "run",
+        "--allow-net",
+        "--allow-read=.",
+        "--allow-env",
+        "api/mcp_server.ts"
+      ]
+    }
+  }
+}
