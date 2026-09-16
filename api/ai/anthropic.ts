@@ -50,19 +50,34 @@ function textOf(content: Anthropic.Beta.BetaContentBlock[]): string {
     .trim();
 }
 
-// Fail fast when no key is present. Without this the SDK falls back to looking
-// for an `ant auth login` profile under ~/.config/anthropic, which the server's
-// --allow-read=. sandbox denies — surfacing a Deno permission error instead of
-// the real problem, which is simply that no credential is configured.
-function missingCredential(): string | null {
+// The SDK resolves credentials in order: ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN,
+// then an `ant auth login` OAuth profile on disk. The profile is the option that
+// works off a Claude subscription instead of a console key — but reading it needs
+// the server's sandbox to allow ~/.config/anthropic, so check that permission
+// rather than assuming a missing key means no credential at all.
+async function missingCredential(): Promise<string | null> {
   const key = (Deno.env.get("ANTHROPIC_API_KEY") ?? Deno.env.get("ANTHROPIC_AUTH_TOKEN") ?? "").trim();
   if (key) return null;
-  return "no ANTHROPIC_API_KEY in the server environment — export it and restart the web server " +
-    "(the process reads its environment at startup, so exporting it in another shell has no effect)";
+
+  const dir = Deno.env.get("ANTHROPIC_CONFIG_DIR") ??
+    `${Deno.env.get("HOME") ?? ""}/.config/anthropic`;
+  // Query, never request: a prompt would hang a server with no TTY.
+  const perm = await Deno.permissions.query({ name: "read", path: dir });
+  if (perm.state !== "granted") {
+    return `no ANTHROPIC_API_KEY set, and the server cannot read ${dir} to use an ` +
+      `\`ant auth login\` profile — restart it with --allow-read=.,${dir} ` +
+      `(and --allow-write=${dir} so refreshed tokens can be saved)`;
+  }
+  try {
+    await Deno.stat(`${dir}/credentials`);
+  } catch {
+    return `no ANTHROPIC_API_KEY set and no OAuth profile in ${dir} — run \`ant auth login\``;
+  }
+  return null;
 }
 
 export async function askAnthropic(system: string, user: string, timeoutMs: number): Promise<string> {
-  const missing = missingCredential();
+  const missing = await missingCredential();
   if (missing) throw new Error(missing);
 
   const model = anthropicModelName();
