@@ -1040,6 +1040,9 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
       .filter((e) => view !== "arch" || ["TRUSTS", "REACHES", "USES", "FORWARDS"].includes(e.type))
       .map((e) => ({
         id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
+        // React Flow's `type` is the renderer; keep the claim it represents so
+        // the SVG and HTML exports can colour and filter by it.
+        kind: e.type,
         animated: e.type === "REFERENCES",
         markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
         // Solid for a real dependency, faint dashes for mere reachability: the
@@ -1237,11 +1240,22 @@ function architectureSvg(nodes, edges, meta) {
     );
   }
 
+  // Edges carry their endpoints and claim type so the HTML export can highlight
+  // them; in a plain .svg the attributes are inert. Colours mirror the app:
+  // solid for a real dependency, faint dashes for mere reachability.
+  const EDGE_STYLE = {
+    USES: 'stroke="#34d399" stroke-width="1.6"',
+    FORWARDS: 'stroke="#38bdf8" stroke-width="1.6"',
+    TRUSTS: 'stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="5 4"',
+    REACHES: 'stroke="#475569" stroke-width="1" stroke-dasharray="3 4" opacity="0.5"',
+  };
   for (const e of edges ?? []) {
     const a = sized.find((s) => s.n.id === e.source), b = sized.find((s) => s.n.id === e.target);
     if (!a || !b) continue;
+    const style = EDGE_STYLE[e.kind] ?? 'stroke="#475569" stroke-width="1.2"';
     parts.push(
-      `<line x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" stroke="#475569" stroke-width="1.2"/>`,
+      `<line class="awsome-edge" data-from="${esc(e.source)}" data-to="${esc(e.target)}" ` +
+        `x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" ${style}/>`,
     );
   }
 
@@ -1279,7 +1293,10 @@ function architectureHtml(nodes, edges, findings, meta) {
   // Script content is raw text, not entity-decoded, so HTML-escaping would
   // corrupt the JSON. Escaping "<" as \u003c is valid JSON and cannot terminate
   // the tag.
-  const payload = JSON.stringify({ detail, findings: active }).replace(/</g, "\\u003c");
+  const links = (edges ?? [])
+    .filter((e) => e.source && e.target)
+    .map((e) => ({ f: e.source, t: e.target, k: e.kind ?? "" }));
+  const payload = JSON.stringify({ detail, findings: active, links }).replace(/</g, "\\u003c");
 
   const sevRow = ["critical", "high", "medium", "low"]
     .filter((k) => counts[k])
@@ -1309,6 +1326,9 @@ main{position:relative;height:calc(100vh - 58px);overflow:auto}
 #diagram svg{max-width:none}
 .awsome-node{cursor:pointer}
 #diagram svg text{pointer-events:none}
+.awsome-node,.awsome-edge{transition:opacity .12s}
+.dim{opacity:.16}
+.dim-edge{opacity:.07}
 .awsome-node:hover rect{stroke-width:2.5}
 #panel{position:fixed;right:14px;top:70px;width:380px;max-height:calc(100vh - 92px);overflow:auto;background:#0a0f1cf2;border:1px solid #2a3550;border-radius:12px;padding:14px;display:none;backdrop-filter:blur(4px)}
 #panel.open{display:block}
@@ -1374,12 +1394,52 @@ td.k{color:#64748b;width:44%;padding-right:8px}
       : '<tr><td colspan="2">no properties collected</td></tr>';
     panel.classList.add("open");
   }
-  document.querySelectorAll(".awsome-node").forEach(function(g){
-    g.addEventListener("click", function(e){ e.stopPropagation(); show(g.getAttribute("data-node-id")); });
+  // ---- focus: same reduction as the app ----------------------------------
+  // Resources nothing connects to recede from the start; selecting one leaves
+  // only its connections lit. Skipped when there are no edges at all, as in the
+  // component view, where dimming by connectivity would fade everything.
+  var nodeEls = [].slice.call(document.querySelectorAll(".awsome-node"));
+  var edgeEls = [].slice.call(document.querySelectorAll(".awsome-edge"));
+  var links = D.links || [];
+  var hasEdges = links.length > 0;
+
+  var touching = {};
+  links.forEach(function(l){ touching[l.f] = true; touching[l.t] = true; });
+
+  function applyFocus(id){
+    if (!hasEdges) return;
+    var keep = null;
+    if (id) {
+      keep = {}; keep[id] = true;
+      links.forEach(function(l){
+        if (l.f === id) keep[l.t] = true;
+        if (l.t === id) keep[l.f] = true;
+      });
+    }
+    nodeEls.forEach(function(g){
+      var nid = g.getAttribute("data-node-id");
+      var lit = keep ? !!keep[nid] : !!touching[nid];
+      g.classList.toggle("dim", !lit);
+    });
+    edgeEls.forEach(function(ln){
+      var on = keep ? (keep[ln.getAttribute("data-from")] && keep[ln.getAttribute("data-to")]) : true;
+      ln.classList.toggle("dim-edge", !on);
+    });
+  }
+  applyFocus(null);
+
+  nodeEls.forEach(function(g){
+    g.addEventListener("click", function(e){
+      e.stopPropagation();
+      var id = g.getAttribute("data-node-id");
+      show(id);
+      applyFocus(id);
+    });
   });
-  // clicking empty canvas closes, matching the app
-  document.getElementById("diagram").addEventListener("click", function(){ panel.classList.remove("open"); });
-  document.getElementById("x").addEventListener("click", function(){ panel.classList.remove("open"); });
+  function reset(){ panel.classList.remove("open"); applyFocus(null); }
+  // clicking empty canvas closes and restores, matching the app
+  document.getElementById("diagram").addEventListener("click", reset);
+  document.getElementById("x").addEventListener("click", reset);
 
   var order = {critical:0, high:1, medium:2, low:3, info:4};
   var list = D.findings.slice().sort(function(a,b){
@@ -1397,7 +1457,7 @@ td.k{color:#64748b;width:44%;padding-right:8px}
     document.getElementById("findings").style.display = which==="findings"?"block":"none";
     document.getElementById("t-diagram").setAttribute("aria-selected", which==="diagram");
     document.getElementById("t-findings").setAttribute("aria-selected", which==="findings");
-    if (which!=="diagram") panel.classList.remove("open");
+    if (which!=="diagram") reset();
   }
   document.getElementById("t-diagram").addEventListener("click", function(){tab("diagram");});
   document.getElementById("t-findings").addEventListener("click", function(){tab("findings");});
