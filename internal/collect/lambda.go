@@ -61,6 +61,12 @@ func emitFunction(a acc, fn types.FunctionConfiguration, vpc *types.VpcConfigRes
 	n.Properties["in_vpc"] = vpc != nil && aws.ToString(vpc.VpcId) != ""
 	emit.Send(n)
 
+	// The execution role is what makes a function's dependencies knowable: its
+	// policies name the exact table, bucket and queue ARNs the function uses.
+	if role := aws.ToString(fn.Role); role != "" {
+		emit.Send(a.edge(n.Key, role, "USES_ROLE"))
+	}
+
 	if vpc == nil {
 		return
 	}

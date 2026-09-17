@@ -625,59 +625,206 @@ const TIERS = [
 
 const A_LANE_HEAD2 = 52, A_TIER_HEAD = 40, A_TIER_PADX = 16, A_TIER_PADB = 16;
 
-// deriveReachability turns security-group rules into component-to-component
-// links. A security group edge SG-db -> SG-app means db's ingress admits app, so
-// members of app can reach members of db. Nothing new is collected: this is the
-// reachability already encoded in the rules, made explicit.
-//
-// ENIs are collapsed into whatever owns them. A load balancer reaches a database
-// through an ENI, and drawing the ENI hop instead of the endpoints hides the
-// relationship the diagram exists to show.
-function deriveReachability(graph) {
-  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-  const owner = new Map(); // eni -> owning resource
-  for (const e of graph.edges) {
-    if (e.type === "ATTACHES" && byId.get(e.to)?.label === "ENI") owner.set(e.to, e.from);
-    if (e.type === "ATTACHED_TO" && byId.get(e.from)?.label === "ENI") owner.set(e.from, e.to);
-  }
-  const resolve = (id) => {
-    let cur = id;
-    for (let i = 0; i < 3 && byId.get(cur)?.label === "ENI"; i++) {
-      const next = owner.get(cur);
-      if (!next) break;
-      cur = next;
-    }
-    return cur;
-  };
+// ---- architecture edge derivation -------------------------------------------
+// Three different claims, kept distinct because they mean different things:
+//   USES    — an IAM policy names this resource, so the caller genuinely uses it
+//   REACHES — a security group admits the traffic, so it *could* talk to it
+//   FORWARDS— a load balancer sends requests here
+const INTERNET_ID = "__internet__";
 
-  const members = new Map(); // sg -> [resources]
-  for (const e of graph.edges) {
-    if (e.type !== "ASSOC_WITH" || byId.get(e.to)?.label !== "SG") continue;
-    if (!members.has(e.to)) members.set(e.to, []);
-    members.get(e.to).push(e.from);
-  }
-
-  const seen = new Set();
+// resourceARNsIn pulls the resource ARNs a policy document grants on. Wildcards
+// name no specific resource, so they are skipped rather than linked to
+// everything.
+function resourceARNsIn(doc) {
   const out = [];
-  for (const e of graph.edges) {
-    if (e.type !== "REFERENCES") continue;
-    // e.from admits e.to, so traffic runs from e.to's members to e.from's.
-    for (const rawSrc of members.get(e.to) ?? []) {
-      for (const rawDst of members.get(e.from) ?? []) {
-        const src = resolve(rawSrc), dst = resolve(rawDst);
-        if (src === dst) continue;
-        const k = `${src}->${dst}`;
-        if (seen.has(k)) continue;
-        seen.add(k);
-        out.push({ from: src, to: dst, type: "REACHES" });
-      }
+  let parsed;
+  try { parsed = JSON.parse(doc); } catch { return out; }
+  const stmts = Array.isArray(parsed?.Statement) ? parsed.Statement : [];
+  for (const st of stmts) {
+    if (String(st?.Effect ?? "").toLowerCase() !== "allow") continue;
+    const res = Array.isArray(st.Resource) ? st.Resource : st.Resource ? [st.Resource] : [];
+    for (const r of res) {
+      if (typeof r !== "string" || r === "*" || !r.startsWith("arn:")) continue;
+      out.push(r);
     }
   }
   return out;
 }
 
+// arnRoot strips a trailing wildcard or sub-path so "arn:...:bucket/*" matches
+// the bucket node "arn:...:bucket".
+function arnRoot(arn) {
+  let a = arn.replace(/\/\*$/, "").replace(/\*$/, "");
+  return a.replace(/\/$/, "");
+}
+
+// Workload grouping infers which application a resource belongs to from its
+// name. Names usually encode it — "<org>-<env>-media-processor",
+// "support-triage-<env>-config" — so removing the tokens shared across the
+// estate leaves the application.
+//
+// The org prefix is derived, not hardcoded: any token appearing in most names is
+// boilerplate for that account, whatever the organisation calls itself.
+// Environment markers are recognised by shape rather than by name.
+const ENV_TOKEN = /^(alpha|prd|prod|dev|test|stg|staging|qa|uat|sandbox)\d*$/i;
+
+function makeAppOf(names) {
+  const freq = new Map();
+  let total = 0;
+  for (const nm of names) {
+    if (!nm) continue;
+    total++;
+    for (const t of new Set(String(nm).split(/[-_/.]/).filter(Boolean))) {
+      freq.set(t, (freq.get(t) ?? 0) + 1);
+    }
+  }
+  // A token in over half the names identifies the estate, not the workload.
+  const boilerplate = new Set();
+  for (const [t, c] of freq) {
+    if (total >= 4 && c / total > 0.5) boilerplate.add(t);
+  }
+  return (name) => {
+    if (!name) return "other";
+    const kept = String(name).split(/[-_/.]/).filter(Boolean)
+      .filter((t) => !ENV_TOKEN.test(t) && !boilerplate.has(t));
+    return kept.length ? kept.slice(0, 2).join("-").toLowerCase() : "other";
+  };
+}
+
+function deriveArchEdges(graph) {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const label = (id) => byId.get(id)?.label;
+
+  // --- collapse ENIs into their owner --------------------------------------
+  const owner = new Map();
+  for (const e of graph.edges) {
+    if (e.type === "ATTACHES" && label(e.to) === "ENI") owner.set(e.to, e.from);
+    if (e.type === "ATTACHED_TO" && label(e.from) === "ENI") owner.set(e.from, e.to);
+  }
+  const resolve = (id) => {
+    let cur = id;
+    for (let i = 0; i < 3 && label(cur) === "ENI"; i++) {
+      const nxt = owner.get(cur);
+      if (!nxt) break;
+      cur = nxt;
+    }
+    return cur;
+  };
+
+  const edges = [];
+  const seen = new Set();
+  const push = (from, to, type, extra) => {
+    if (!from || !to || from === to) return;
+    const k = `${from}->${to}->${type}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    edges.push({ from, to, type, ...extra });
+  };
+
+  // --- 1. IAM-policy dependencies: what a workload actually uses -----------
+  const rolesOf = new Map();     // compute -> [roleArn]
+  const profileRole = new Map(); // instance profile -> role
+  for (const e of graph.edges) {
+    if (e.type === "HAS_ROLE") profileRole.set(e.from, e.to);
+  }
+  for (const e of graph.edges) {
+    if (e.type === "USES_ROLE") {
+      if (!rolesOf.has(e.from)) rolesOf.set(e.from, []);
+      rolesOf.get(e.from).push(e.to);
+    }
+    if (e.type === "USES_PROFILE") {
+      const role = profileRole.get(e.to);
+      if (role) {
+        if (!rolesOf.has(e.from)) rolesOf.set(e.from, []);
+        rolesOf.get(e.from).push(role);
+      }
+    }
+  }
+  const policiesOf = new Map();  // role -> [policyArn]
+  for (const e of graph.edges) {
+    if (e.type !== "USES_POLICY") continue;
+    if (!policiesOf.has(e.from)) policiesOf.set(e.from, []);
+    policiesOf.get(e.from).push(e.to);
+  }
+  // resource ARNs, indexed so a policy's ARN can find the node it names
+  const nodeByArn = new Map();
+  for (const n of graph.nodes) nodeByArn.set(arnRoot(n.id), n.id);
+
+  for (const [compute, roles] of rolesOf) {
+    for (const role of roles) {
+      for (const pol of policiesOf.get(role) ?? []) {
+        const doc = byId.get(pol)?.properties?.document;
+        if (typeof doc !== "string") continue;
+        for (const arn of resourceARNsIn(doc)) {
+          const target = nodeByArn.get(arnRoot(arn));
+          if (target) push(compute, target, "USES");
+        }
+      }
+    }
+  }
+
+  // --- 2. security-group reachability, with the port that permits it -------
+  const members = new Map();
+  for (const e of graph.edges) {
+    if (e.type !== "ASSOC_WITH" || label(e.to) !== "SG") continue;
+    if (!members.has(e.to)) members.set(e.to, []);
+    members.get(e.to).push(e.from);
+  }
+  // which ports a group's rules open to a peer group
+  const portsFor = (sgId, peerId) => {
+    const rules = byId.get(sgId)?.properties?.ingress_rules;
+    if (!Array.isArray(rules)) return "";
+    const peerShort = String(peerId).split("/").pop();
+    const hits = [];
+    for (const r of rules) {
+      if (r?.source_sg !== peerShort) continue;
+      const from = r.from, to = r.to;
+      if (from === null || from === undefined) hits.push("all");
+      else hits.push(from === to ? String(from) : `${from}-${to}`);
+    }
+    return [...new Set(hits)].slice(0, 3).join(",");
+  };
+  for (const e of graph.edges) {
+    if (e.type !== "REFERENCES") continue;
+    const ports = portsFor(e.from, e.to);
+    for (const rawSrc of members.get(e.to) ?? []) {
+      for (const rawDst of members.get(e.from) ?? []) {
+        push(resolve(rawSrc), resolve(rawDst), "REACHES", { ports });
+      }
+    }
+  }
+
+  // --- 3. request path through the load balancer ---------------------------
+  for (const e of graph.edges) {
+    if (e.type === "FORWARDS") push(resolve(e.from), resolve(e.to), "FORWARDS");
+  }
+
+  // --- 4. the internet, so the diagram starts where requests do ------------
+  for (const n of graph.nodes) {
+    if (n.label !== "LB") continue;
+    if (String(n.properties?.scheme ?? "") !== "internet-facing") continue;
+    push(INTERNET_ID, n.id, "FORWARDS");
+  }
+
+  // --- 5. bundle: one line per pair, carrying how many grants it represents -
+  const bundled = new Map();
+  for (const e of edges) {
+    const k = `${e.from}->${e.to}`;
+    const prev = bundled.get(k);
+    // A real dependency outranks mere reachability between the same two nodes.
+    const rank = { USES: 3, FORWARDS: 2, REACHES: 1 };
+    if (!prev || rank[e.type] > rank[prev.type]) {
+      bundled.set(k, { ...e, count: (prev?.count ?? 0) + 1 });
+    } else {
+      prev.count = (prev.count ?? 1) + 1;
+    }
+  }
+  return [...bundled.values()];
+}
+
 function layoutTiered(graph, opts) {
   const { overlayByKey, region } = opts;
+  const appOf = makeAppOf(graph.nodes.map((n) => n.name));
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 
   // Only roles that actually take part in a trust relationship are drawn;
@@ -712,6 +859,15 @@ function layoutTiered(graph, opts) {
   const out = [];
   const COLS = 2;
   let laneY = 0;
+
+  // Requests start somewhere. Without this the edge tier looks like an origin
+  // rather than a boundary.
+  out.push({
+    id: INTERNET_ID, type: "aws", position: { x: 0, y: 0 },
+    style: { width: A_NODE_W, height: A_NODE_H }, width: A_NODE_W, height: A_NODE_H,
+    data: { name: "Internet", label: "PUBLIC", resourceLabel: "PUBLIC", accentColor: "#f87171", title: "Public internet" },
+  });
+  laneY += A_NODE_H + 24;
 
   for (const acct of [...lanes.keys()].sort()) {
     const byTier = lanes.get(acct);
@@ -751,7 +907,13 @@ function layoutTiered(graph, opts) {
           fill: "rgba(148,163,184,0.04)", stroke: "#475569", borderStyle: "dashed", borderWidth: 1,
         },
       });
-      b.items.forEach((n, i) => {
+      // Within a tier, keep a workload's resources adjacent: reading "here is
+      // community-upload end to end" beats reading "here are all the Lambdas".
+      const ordered = [...b.items].sort((x, y) => {
+        const ax = appOf(x.name), ay = appOf(y.name);
+        return ax === ay ? String(x.name).localeCompare(String(y.name)) : ax.localeCompare(ay);
+      });
+      ordered.forEach((n, i) => {
         const c = i % b.g.cols, r = Math.floor(i / b.g.cols);
         const ov = overlayByKey?.get(n.id);
         out.push({
@@ -863,7 +1025,7 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
   const archEdges = useMemo(() => {
     if (view !== "component" && view !== "arch") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
-    const derived = view === "arch" ? deriveReachability(graph) : [];
+    const derived = view === "arch" ? deriveArchEdges(graph) : [];
     // An edge pointing at a container the source already sits inside (an
     // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
     // its own border. Nesting already states it.
@@ -875,19 +1037,26 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
       .filter((e) => !containers.has(e.to) && !containers.has(e.from))
       // The architecture view is about the request/trust path, so it draws only
       // edges that represent one; the component view keeps the rest.
-      .filter((e) => view !== "arch" || e.type === "TRUSTS" || e.type === "REACHES")
+      .filter((e) => view !== "arch" || ["TRUSTS", "REACHES", "USES", "FORWARDS"].includes(e.type))
       .map((e) => ({
         id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
         animated: e.type === "REFERENCES",
         markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
-        style: e.type === "REACHES"
-          ? { stroke: "#38bdf8", strokeWidth: 1.4 }
+        // Solid for a real dependency, faint dashes for mere reachability: the
+        // two make different claims and should not look alike.
+        style: e.type === "USES"
+          ? { stroke: "#34d399", strokeWidth: 1.8 }
+          : e.type === "FORWARDS"
+          ? { stroke: "#38bdf8", strokeWidth: 1.8 }
+          : e.type === "REACHES"
+          ? { stroke: "#475569", strokeDasharray: "3 4", strokeWidth: 1, opacity: 0.55 }
           : e.type === "TRUSTS"
           ? { stroke: "#a78bfa", strokeDasharray: "5 4", strokeWidth: 1.4 }
-          : e.type === "REFERENCES"
-          ? { stroke: "#f97316", strokeDasharray: "5 5", strokeWidth: 1.2 }
           : { stroke: "#475569", strokeWidth: 1.2 },
-        labelStyle: { fontSize: 0 }, zIndex: 5,
+        label: e.type === "REACHES" && e.ports ? `:${e.ports}` : (e.count > 1 ? `×${e.count}` : undefined),
+        labelStyle: { fontSize: 9, fill: "#94a3b8" },
+        labelBgStyle: { fill: "#070b14", fillOpacity: 0.85 },
+        zIndex: e.type === "REACHES" ? 3 : 6,
       }));
   }, [view, graph, archNodes]);
 
