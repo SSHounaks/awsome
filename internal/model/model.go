@@ -33,6 +33,7 @@ type Coverage struct {
 	Kind       string `json:"kind"`
 	Service    string `json:"service"`
 	Region     string `json:"region"`
+	AccountID  string `json:"account_id,omitempty"`
 	Status     string `json:"status"`
 	Reason     string `json:"reason,omitempty"`
 	Error      string `json:"error,omitempty"`

@@ -94,6 +94,7 @@ func coverageFor(step Step, snapshotID string, err error) model.Coverage {
 		Kind:       "coverage",
 		Service:    step.Service,
 		Region:     step.Region,
+		AccountID:  step.AccountID,
 		Status:     "ok",
 		SnapshotID: snapshotID,
 		ScannedAt:  model.Now(),

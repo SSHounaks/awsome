@@ -2,8 +2,10 @@ package collect
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -95,6 +97,70 @@ func emitIamRole(a acc, role types.Role, attached []types.AttachedPolicy, emit *
 			emit.Send(a.edge(n.Key, pArn, "USES_POLICY"))
 		}
 	}
+
+	// Who may assume this role, as a traversable edge rather than a blob of JSON
+	// on the node. In a multi-account scan these connect the two accounts, which
+	// is what makes "what can reach into this tenant" a graph query.
+	for _, p := range trustedPrincipalARNs(trustPolicy) {
+		emit.Send(a.edge(p, n.Key, "TRUSTS"))
+	}
+}
+
+// trustedPrincipalARNs pulls IAM principal ARNs out of a trust policy. Service
+// principals (ecs-tasks.amazonaws.com) and bare wildcards are deliberately
+// skipped: they name no node, and the wildcard case is already reported by
+// iam-trust-wildcard.
+func trustedPrincipalARNs(trustPolicy string) []string {
+	if trustPolicy == "" {
+		return nil
+	}
+	var doc struct {
+		Statement []struct {
+			Effect    string          `json:"Effect"`
+			Principal json.RawMessage `json:"Principal"`
+		} `json:"Statement"`
+	}
+	if json.Unmarshal([]byte(trustPolicy), &doc) != nil {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if !strings.HasPrefix(s, "arn:") || strings.Contains(s, ":root") || seen[s] {
+			return
+		}
+		// ":root" names the whole account, not a principal we collect as a node.
+		seen[s] = true
+		out = append(out, s)
+	}
+
+	for _, st := range doc.Statement {
+		if !strings.EqualFold(st.Effect, "Allow") || len(st.Principal) == 0 {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(st.Principal, &obj) != nil {
+			continue
+		}
+		for key, v := range obj {
+			if !strings.EqualFold(key, "AWS") {
+				continue
+			}
+			var one string
+			if json.Unmarshal(v, &one) == nil {
+				add(one)
+				continue
+			}
+			var many []string
+			if json.Unmarshal(v, &many) == nil {
+				for _, m := range many {
+					add(m)
+				}
+			}
+		}
+	}
+	return out
 }
 
 func emitIamPolicy(a acc, policy types.Policy, document string, emit *Emitter) {
