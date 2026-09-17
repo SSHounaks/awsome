@@ -287,7 +287,15 @@ compose.yml              LocalStack service
 
 Compare any two snapshots with `GET /api/diff?from=<snap>&to=<snap>` (defaults to latest vs previous). Returns per-node added/removed/changed (property-level field deltas), edge diffs, and finding-level drift (new/resolved findings, severity or message changes). Exposed in the SPA as the **Diff** tab.
 
-The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. Export the whole report as Markdown or JSON with the buttons in the toolbar or:
+The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. The **architecture** view exports two self-contained artefacts from the toolbar:
+
+- **SVG** — the diagram alone, for docs and slides.
+- **HTML** — a single-file report: the diagram with click-to-inspect resource
+  details, plus a findings view. No server, no network, no build step; the
+  diagram is inlined as SVG and the data as JSON, so it opens offline and
+  survives being emailed. Verified by rendering it in an offline browser context.
+
+Export the whole report as Markdown or JSON with the buttons in the toolbar or:
 
 ```sh
 curl -s 'http://127.0.0.1:8000/api/diff/export?format=md'
