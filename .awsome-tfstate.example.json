@@ -1,0 +1,16 @@
+{
+  "_comment": "Where each account's Terraform state lives. Reading state needs s3:GetObject on the state bucket - a higher privilege than scanning, so give it its own profile. Copy to .awsome-tfstate.json (gitignored) and fill in real values.",
+  "states": [
+    {
+      "account_id": "111111111111",
+      "bucket": "example-terraform-states",
+      "key": "tenant1/terraform.tfstate",
+      "region": "us-gov-west-1",
+      "profile": "ReadOnlyAccess-111111111111"
+    },
+    {
+      "account_id": "222222222222",
+      "path": "/tmp/local-copy.tfstate"
+    }
+  ]
+}
