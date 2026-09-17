@@ -1062,6 +1062,55 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
 
   const isArch = view === "component" || view === "arch";
   const [selected, setSelected] = useState(null);
+
+  // ---- focus mode -----------------------------------------------------------
+  // An architecture diagram with 257 edges is unreadable all at once. Two things
+  // reduce it: resources nothing connects to are dimmed from the start (they are
+  // inventory, not part of any path), and selecting one resource dims everything
+  // that is not on one of its connections.
+  const connected = useMemo(() => {
+    const set = new Set();
+    for (const e of archEdges) { set.add(e.source); set.add(e.target); }
+    return set;
+  }, [archEdges]);
+
+  const neighbourhood = useMemo(() => {
+    if (!selected) return null;
+    const nodes = new Set([selected]);
+    const edges = new Set();
+    for (const e of archEdges) {
+      if (e.source === selected || e.target === selected) {
+        edges.add(e.id);
+        nodes.add(e.source);
+        nodes.add(e.target);
+      }
+    }
+    return { nodes, edges };
+  }, [selected, archEdges]);
+
+  const DIM = 0.16;
+  const focusedNodes = useMemo(() => {
+    if (!isArch) return archNodes;
+    return archNodes.map((n) => {
+      if (n.type === "group") return n;
+      // With a selection, anything off its connections recedes. Without one,
+      // only resources that connect to nothing recede.
+      const lit = neighbourhood ? neighbourhood.nodes.has(n.id) : connected.has(n.id);
+      if (lit) return n;
+      return { ...n, style: { ...(n.style ?? {}), opacity: DIM } };
+    });
+  }, [isArch, archNodes, neighbourhood, connected]);
+
+  const focusedEdges = useMemo(() => {
+    if (!isArch || !neighbourhood) return archEdges;
+    return archEdges.map((e) =>
+      neighbourhood.edges.has(e.id)
+        ? { ...e, style: { ...(e.style ?? {}), opacity: 1, strokeWidth: (e.style?.strokeWidth ?? 1.4) + 0.6 }, animated: true }
+        : { ...e, style: { ...(e.style ?? {}), opacity: 0.07 }, label: undefined },
+    );
+  }, [isArch, archEdges, neighbourhood]);
+
+
   // A node that vanishes between views (or between snapshots) must not leave a
   // stale panel open.
   const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
@@ -1080,8 +1129,8 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
 
   return h(ReactFlowProvider, null,
     h(FlowCanvas, {
-      nodes: isArch ? archNodes : layoutedNodes,
-      edges: isArch ? archEdges : allEdges,
+      nodes: isArch ? focusedNodes : layoutedNodes,
+      edges: isArch ? focusedEdges : allEdges,
       overlayByKey, COLORS, viewKey: view,
       onNodeClick,
       onPaneClick: () => setSelected(null),

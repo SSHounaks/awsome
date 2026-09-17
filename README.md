@@ -297,6 +297,11 @@ The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) 
   lanes.
 - **flow** — the raw dependency graph, laid out left to right.
 
+In the architecture view, resources nothing connects to are dimmed from the
+start — they are inventory, not part of any path. Clicking a resource dims
+everything that is not on one of its connections and thickens the ones that are;
+clicking empty canvas restores the full picture.
+
 The component and architecture views export two self-contained artefacts from the toolbar:
 
 - **SVG** — the diagram alone, for docs and slides.
