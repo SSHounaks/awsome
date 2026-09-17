@@ -33,6 +33,7 @@ var ruleOrder = []func(*Graph) []Finding{
 	ruleFlowLogsDisabled,
 	ruleOrphanSG,
 	ruleMissingTags,
+	ruleUnmanagedResource,
 }
 
 func Run(g *Graph) []Finding {
