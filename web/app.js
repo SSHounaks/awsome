@@ -610,6 +610,121 @@ const LANE_TITLES = {
   ELASTICACHE: "ElastiCache clusters",
 };
 
+/* ---------- architecture view: request path by tier ----------
+ * The component view answers "what runs where". This one answers "what talks to
+ * what": resources are placed in the tier their role puts them in, laid out
+ * left-to-right in the direction traffic flows, with one lane per account so
+ * cross-account trust is visible as a line between lanes.
+ */
+const TIERS = [
+  { id: "edge", title: "Edge", hint: "internet-facing", labels: ["IGW", "LB"] },
+  { id: "compute", title: "Compute", hint: "application tier", labels: ["EC2", "LAMBDA", "ECSCLUSTER", "EKS", "ASG"] },
+  { id: "data", title: "Data", hint: "state and artefacts", labels: ["RDS", "ELASTICACHE", "DYNAMODBTABLE", "REDSHIFT", "OPENSEARCH", "S3BUCKET", "ECRREPOSITORY"] },
+  { id: "identity", title: "Identity", hint: "assumable roles", labels: ["__trusted_role__"] },
+];
+
+const A_LANE_HEAD2 = 52, A_TIER_HEAD = 40, A_TIER_PADX = 16, A_TIER_PADB = 16;
+
+function layoutTiered(graph, opts) {
+  const { overlayByKey, region } = opts;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+
+  // Only roles that actually take part in a trust relationship are drawn;
+  // otherwise the identity tier is hundreds of boxes nobody reads.
+  const inTrust = new Set();
+  for (const e of graph.edges) {
+    if (e.type !== "TRUSTS") continue;
+    inTrust.add(e.from);
+    inTrust.add(e.to);
+  }
+
+  const tierOf = (n) => {
+    if (n.label === "IAMROLE") return inTrust.has(n.id) ? "identity" : null;
+    for (const t of TIERS) {
+      if (t.labels.includes(n.label)) return t.id;
+    }
+    return null;
+  };
+
+  // account -> tier -> nodes
+  const lanes = new Map();
+  for (const n of graph.nodes) {
+    const tier = tierOf(n);
+    if (!tier) continue;
+    const acct = n.account_id || "unknown";
+    if (!lanes.has(acct)) lanes.set(acct, new Map());
+    const byTier = lanes.get(acct);
+    if (!byTier.has(tier)) byTier.set(tier, []);
+    byTier.get(tier).push(n);
+  }
+
+  const out = [];
+  const COLS = 2;
+  let laneY = 0;
+
+  for (const acct of [...lanes.keys()].sort()) {
+    const byTier = lanes.get(acct);
+    const boxes = TIERS.map((t) => {
+      const items = byTier.get(t.id) ?? [];
+      // A tier with 25 ECR repositories should not become a 25-row column while
+      // the edge tier next to it holds three.
+      const cols = Math.max(COLS, Math.min(5, Math.ceil(Math.sqrt(items.length || 1))));
+      const g = gridSize(items.length || 1, cols, A_NODE_W, A_NODE_H, A_GAP);
+      return { t, items, g, w: g.w + 2 * A_TIER_PADX, h: A_TIER_HEAD + g.h + A_TIER_PADB };
+    });
+    const innerW = boxes.reduce((a, b) => a + b.w, 0) + (boxes.length - 1) * A_GAP;
+    const innerH = Math.max(...boxes.map((b) => b.h));
+    const laneH = A_LANE_HEAD2 + innerH + A_LANE_PADB;
+
+    out.push({
+      id: `__lane__${acct}`, type: "group", position: { x: 0, y: laneY },
+      style: { width: innerW + 2 * A_LANE_PADX, height: laneH },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `Account ${acct}`,
+        subtitle: region ? `${region}   ·   traffic flows left to right` : "traffic flows left to right",
+        fill: "rgba(99,102,241,0.04)", stroke: "#6366f1",
+      },
+    });
+
+    let tx = 0;
+    for (const b of boxes) {
+      const tid = `__tier__${acct}__${b.t.id}`;
+      out.push({
+        id: tid, type: "group", parentId: `__lane__${acct}`, extent: "parent",
+        position: { x: A_LANE_PADX + tx, y: A_LANE_HEAD2 },
+        style: { width: b.w, height: innerH },
+        selectable: false, draggable: false, zIndex: 1,
+        data: {
+          title: b.t.title, subtitle: `${b.items.length} · ${b.t.hint}`,
+          fill: "rgba(148,163,184,0.04)", stroke: "#475569", borderStyle: "dashed", borderWidth: 1,
+        },
+      });
+      b.items.forEach((n, i) => {
+        const c = i % b.g.cols, r = Math.floor(i / b.g.cols);
+        const ov = overlayByKey?.get(n.id);
+        out.push({
+          id: n.id, type: "aws", parentId: tid, extent: "parent",
+          position: { x: A_TIER_PADX + c * (A_NODE_W + A_GAP), y: A_TIER_HEAD + r * (A_NODE_H + A_GAP) },
+          style: { width: A_NODE_W, height: A_NODE_H },
+          width: A_NODE_W, height: A_NODE_H,
+          data: {
+            name: n.name || n.id.split("/").pop().split(":").pop(),
+            label: n.label, marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
+            resourceLabel: n.label, icon: iconFor(n.label, n.properties),
+            accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
+            emphasised: Boolean(ov),
+            title: `${n.name || ""}\n${n.label}\n${n.id}`,
+          },
+        });
+      });
+      tx += b.w + A_GAP;
+    }
+    laneY += laneH + 30;
+  }
+  return out;
+}
+
 // Containment is drawn as nesting in the architecture view, so those edges would
 // just be noise on top of it.
 const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS"]);
@@ -686,11 +801,16 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
   const layoutedNodes = useMemo(() => layoutGraph(allNodes, allEdges), [allNodes, allEdges]);
 
   const archNodes = useMemo(
-    () => (view === "arch" ? layoutArchitecture(graph, { overlayByKey, region }) : []),
+    () =>
+      view === "component"
+        ? layoutArchitecture(graph, { overlayByKey, region })
+        : view === "arch"
+        ? layoutTiered(graph, { overlayByKey, region })
+        : [],
     [view, graph, overlayByKey, region],
   );
   const archEdges = useMemo(() => {
-    if (view !== "arch") return [];
+    if (view !== "component" && view !== "arch") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
     // An edge pointing at a container the source already sits inside (an
     // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
@@ -701,6 +821,9 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
     return graph.edges
       .filter((e) => !ARCH_HIDDEN_EDGES.has(e.type) && drawn.has(e.from) && drawn.has(e.to))
       .filter((e) => !containers.has(e.to) && !containers.has(e.from))
+      // The architecture view is about the request/trust path, so it draws only
+      // edges that represent one; the component view keeps the rest.
+      .filter((e) => view !== "arch" || e.type === "TRUSTS" || e.type === "FORWARDS")
       .map((e) => ({
         id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
         animated: e.type === "REFERENCES",
@@ -712,7 +835,7 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
       }));
   }, [view, graph, archNodes]);
 
-  const isArch = view === "arch";
+  const isArch = view === "component" || view === "arch";
   const [selected, setSelected] = useState(null);
   // A node that vanishes between views (or between snapshots) must not leave a
   // stale panel open.
@@ -2167,7 +2290,7 @@ function App() {
   const [showFindings, setShowFindings] = useState(false);
   // Architecture is the default: the containment view is what people mean by
   // "the diagram". Flow stays available for dependency tracing.
-  const [diagView, setDiagView] = useState("arch");
+  const [diagView, setDiagView] = useState("component");
   const [findingGraph, setFindingGraph] = useState(null);
   const [snaps, setSnaps] = useState([]);
   const [showDiffOv, setShowDiffOv] = useState(false);
@@ -2387,15 +2510,17 @@ function App() {
           h("div", { className: "flex h-full min-h-0 flex-col" },
             h("div", { className: "flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2" },
               h("div", { className: "flex items-center gap-1 rounded-lg border border-white/10 p-0.5" },
-                ["arch", "flow"].map((v) =>
+                ["component", "arch", "flow"].map((v) =>
                   h("button", {
                     key: v,
                     className: cx("toggle border-0", diagView === v ? "toggle-on" : "toggle-off"),
                     onClick: () => setDiagView(v),
-                    title: v === "arch"
-                      ? "AWS architecture view — VPC and subnet boundaries, resources nested inside"
-                      : "Flow view — dependency graph, laid out left to right",
-                  }, v === "arch" ? "architecture" : "flow")
+                    title: v === "component"
+                      ? "Component view — VPC and subnet boundaries with resources nested inside (what runs where)"
+                      : v === "arch"
+                      ? "Architecture view — request path by tier, one lane per account (what talks to what)"
+                      : "Flow view — raw dependency graph, laid out left to right",
+                  }, v === "arch" ? "architecture" : v)
                 ),
               ),
               h("button", { className: cx("toggle", showFindings ? "toggle-on" : "toggle-off"), onClick: toggleFindings },

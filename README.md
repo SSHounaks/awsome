@@ -287,7 +287,17 @@ compose.yml              LocalStack service
 
 Compare any two snapshots with `GET /api/diff?from=<snap>&to=<snap>` (defaults to latest vs previous). Returns per-node added/removed/changed (property-level field deltas), edge diffs, and finding-level drift (new/resolved findings, severity or message changes). Exposed in the SPA as the **Diff** tab.
 
-The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. The **architecture** view exports two self-contained artefacts from the toolbar:
+The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. The diagram has three views:
+
+- **component** — VPC / AZ / subnet boundaries with resources nested inside: what
+  runs where. This is a deployment/topology view.
+- **architecture** — resources placed in the tier their role puts them in (edge →
+  compute → data → identity), one lane per account, drawing only request-path and
+  trust edges: what talks to what. Cross-account trust shows as a line between
+  lanes.
+- **flow** — the raw dependency graph, laid out left to right.
+
+The component and architecture views export two self-contained artefacts from the toolbar:
 
 - **SVG** — the diagram alone, for docs and slides.
 - **HTML** — a single-file report: the diagram with click-to-inspect resource

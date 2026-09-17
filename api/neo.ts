@@ -5,6 +5,8 @@ export interface GraphNode {
   label: string;
   name: string;
   type: string;
+  account_id: string;
+  region: string;
   tags: Record<string, unknown>;
   properties: Record<string, unknown>;
 }
@@ -90,6 +92,11 @@ export function parseNode(row: Record<string, unknown>): GraphNode {
     label: props.label as string ?? "",
     name: (row.name as string) ?? "",
     type: (row.type as string) ?? "",
+    // Surfaced explicitly: with several accounts in one graph the UI groups by
+    // it, and it is deliberately kept out of `properties` so it is not rendered
+    // as just another attribute.
+    account_id: (row.account_id as string) ?? "",
+    region: (row.region as string) ?? "",
     tags,
     properties: props,
   };
@@ -178,6 +185,8 @@ export async function queryFindingNodes(c: Cypher): Promise<GraphNode[]> {
     label: "Finding",
     name: `[${r.severity ?? ""}] ${r.rule ?? ""}`.trim(),
     type: "Finding",
+    account_id: String(r.account_id ?? ""),
+    region: String(r.region ?? ""),
     tags: { severity: r.severity, rule: r.rule },
     properties: {
       severity: r.severity,
