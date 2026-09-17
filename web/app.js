@@ -1090,7 +1090,9 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
 
   const DIM = 0.16;
   const focusedNodes = useMemo(() => {
-    if (!isArch) return archNodes;
+    // Architecture only. The component view answers "what runs where" and has no
+    // edges, so dimming by connectivity there fades the entire diagram.
+    if (view !== "arch") return archNodes;
     return archNodes.map((n) => {
       if (n.type === "group") return n;
       // With a selection, anything off its connections recedes. Without one,
@@ -1099,16 +1101,16 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
       if (lit) return n;
       return { ...n, style: { ...(n.style ?? {}), opacity: DIM } };
     });
-  }, [isArch, archNodes, neighbourhood, connected]);
+  }, [view, archNodes, neighbourhood, connected]);
 
   const focusedEdges = useMemo(() => {
-    if (!isArch || !neighbourhood) return archEdges;
+    if (view !== "arch" || !neighbourhood) return archEdges;
     return archEdges.map((e) =>
       neighbourhood.edges.has(e.id)
         ? { ...e, style: { ...(e.style ?? {}), opacity: 1, strokeWidth: (e.style?.strokeWidth ?? 1.4) + 0.6 }, animated: true }
         : { ...e, style: { ...(e.style ?? {}), opacity: 0.07 }, label: undefined },
     );
-  }, [isArch, archEdges, neighbourhood]);
+  }, [view, archEdges, neighbourhood]);
 
 
   // A node that vanishes between views (or between snapshots) must not leave a
