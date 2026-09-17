@@ -12,7 +12,7 @@ import (
 )
 
 func collectLoadBalancers(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func emitLoadBalancer(a acc, lb types.LoadBalancer, emit *Emitter) {
 }
 
 func collectTargetGroups(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}

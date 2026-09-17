@@ -11,8 +11,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	ct "github.com/aws/aws-sdk-go-v2/service/cloudtrail"
 	cttypes "github.com/aws/aws-sdk-go-v2/service/cloudtrail/types"
-
-	"awsome/internal/awscfg"
 )
 
 type trailRecord struct {
@@ -48,13 +46,19 @@ func collectTrail(ctx context.Context, cfg Config, a acc) error {
 	if cfg.TrailLookback == 0 {
 		return nil
 	}
-	c, err := awscfg.Load(ctx, cfg.EndpointURL, a.region, cfg.Profile)
+	c, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	cli := ct.NewFromConfig(c)
 
-	f, err := os.Create(filepath.Join(cfg.SnapshotDir, a.snapshot, "trail.jsonl"))
+	// One file per account: a multi-account scan runs this step once per target,
+	// and a shared filename would leave only the last account's events.
+	name := "trail.jsonl"
+	if a.accountID != "" {
+		name = "trail-" + a.accountID + ".jsonl"
+	}
+	f, err := os.Create(filepath.Join(cfg.SnapshotDir, a.snapshot, name))
 	if err != nil {
 		return err
 	}

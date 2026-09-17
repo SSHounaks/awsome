@@ -177,6 +177,31 @@ go run ./cmd/awsome-scanner --regions us-east-1,us-west-2
 
 Rules of thumb: no `--endpoint-url` = real AWS; credential chain = SSO/default profile.
 
+### Scanning several accounts at once
+
+`--profiles` scans one account per profile into a single snapshot, so
+cross-account relationships (a role in one account trusted by another) resolve to
+real nodes on both sides instead of dangling:
+
+```sh
+go run ./cmd/awsome-scanner --regions us-gov-west-1 \
+  --profiles ReadOnlyAccess-111111111111,SecurityAudit-222222222222
+```
+
+- Each account authenticates with its **own** profile; a step never borrows
+  another account's credentials.
+- A profile that cannot be resolved is reported and skipped, not fatal — in a
+  real estate some accounts belong to other teams, and scanning what you can
+  reach beats failing entirely. The scan only errors when *nothing* resolved.
+- Two profiles pointing at the same account are de-duplicated, so
+  `ReadOnlyAccess-X,SecurityAudit-X` scans X once.
+- Global steps (IAM, IAM credentials, CloudTrail) run **once per account**, not
+  once per region; CloudTrail writes `trail-<account-id>.jsonl` per account.
+- `summary.json` gains an `accounts` array. `account_id` stays populated with the
+  first account so single-account tooling keeps working.
+
+`--profile` (singular) is unchanged for single-account scans.
+
 ### Non-commercial partitions (GovCloud, China)
 
 Partition is derived from the STS caller ARN, so `arn:aws-us-gov:...` keys are emitted

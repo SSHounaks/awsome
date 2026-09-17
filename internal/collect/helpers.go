@@ -17,6 +17,9 @@ type acc struct {
 	partition string
 	region    string
 	snapshot  string
+	// profile authenticates this account; a multi-account scan carries a
+	// different one per target.
+	profile string
 }
 
 func (a acc) ec2Arn(resource string) string {

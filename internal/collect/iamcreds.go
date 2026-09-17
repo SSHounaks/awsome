@@ -17,7 +17,7 @@ import (
 // most likely to be denied by a restricted role, and degrading it should not cost
 // us the role graph.
 func collectIamCredentials(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}
