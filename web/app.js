@@ -625,6 +625,57 @@ const TIERS = [
 
 const A_LANE_HEAD2 = 52, A_TIER_HEAD = 40, A_TIER_PADX = 16, A_TIER_PADB = 16;
 
+// deriveReachability turns security-group rules into component-to-component
+// links. A security group edge SG-db -> SG-app means db's ingress admits app, so
+// members of app can reach members of db. Nothing new is collected: this is the
+// reachability already encoded in the rules, made explicit.
+//
+// ENIs are collapsed into whatever owns them. A load balancer reaches a database
+// through an ENI, and drawing the ENI hop instead of the endpoints hides the
+// relationship the diagram exists to show.
+function deriveReachability(graph) {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const owner = new Map(); // eni -> owning resource
+  for (const e of graph.edges) {
+    if (e.type === "ATTACHES" && byId.get(e.to)?.label === "ENI") owner.set(e.to, e.from);
+    if (e.type === "ATTACHED_TO" && byId.get(e.from)?.label === "ENI") owner.set(e.from, e.to);
+  }
+  const resolve = (id) => {
+    let cur = id;
+    for (let i = 0; i < 3 && byId.get(cur)?.label === "ENI"; i++) {
+      const next = owner.get(cur);
+      if (!next) break;
+      cur = next;
+    }
+    return cur;
+  };
+
+  const members = new Map(); // sg -> [resources]
+  for (const e of graph.edges) {
+    if (e.type !== "ASSOC_WITH" || byId.get(e.to)?.label !== "SG") continue;
+    if (!members.has(e.to)) members.set(e.to, []);
+    members.get(e.to).push(e.from);
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const e of graph.edges) {
+    if (e.type !== "REFERENCES") continue;
+    // e.from admits e.to, so traffic runs from e.to's members to e.from's.
+    for (const rawSrc of members.get(e.to) ?? []) {
+      for (const rawDst of members.get(e.from) ?? []) {
+        const src = resolve(rawSrc), dst = resolve(rawDst);
+        if (src === dst) continue;
+        const k = `${src}->${dst}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push({ from: src, to: dst, type: "REACHES" });
+      }
+    }
+  }
+  return out;
+}
+
 function layoutTiered(graph, opts) {
   const { overlayByKey, region } = opts;
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
@@ -812,23 +863,28 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
   const archEdges = useMemo(() => {
     if (view !== "component" && view !== "arch") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
+    const derived = view === "arch" ? deriveReachability(graph) : [];
     // An edge pointing at a container the source already sits inside (an
     // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
     // its own border. Nesting already states it.
     const containers = new Set(
       graph.nodes.filter((n) => n.label === "VPC" || n.label === "SUBNET").map((n) => n.id),
     );
-    return graph.edges
+    return [...graph.edges, ...derived]
       .filter((e) => !ARCH_HIDDEN_EDGES.has(e.type) && drawn.has(e.from) && drawn.has(e.to))
       .filter((e) => !containers.has(e.to) && !containers.has(e.from))
       // The architecture view is about the request/trust path, so it draws only
       // edges that represent one; the component view keeps the rest.
-      .filter((e) => view !== "arch" || e.type === "TRUSTS" || e.type === "FORWARDS")
+      .filter((e) => view !== "arch" || e.type === "TRUSTS" || e.type === "REACHES")
       .map((e) => ({
         id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
         animated: e.type === "REFERENCES",
         markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
-        style: e.type === "REFERENCES"
+        style: e.type === "REACHES"
+          ? { stroke: "#38bdf8", strokeWidth: 1.4 }
+          : e.type === "TRUSTS"
+          ? { stroke: "#a78bfa", strokeDasharray: "5 4", strokeWidth: 1.4 }
+          : e.type === "REFERENCES"
           ? { stroke: "#f97316", strokeDasharray: "5 5", strokeWidth: 1.2 }
           : { stroke: "#475569", strokeWidth: 1.2 },
         labelStyle: { fontSize: 0 }, zIndex: 5,
