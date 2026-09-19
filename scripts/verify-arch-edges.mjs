@@ -7,6 +7,7 @@
 import { chromium } from 'playwright-core';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 function findChromium() {
   const root = join(process.env.HOME, '.cache/ms-playwright');
@@ -99,7 +100,10 @@ check(await page.locator('text=what the lines mean').count() === 0, 'clicking th
 // ---- HTML export ------------------------------------------------------------
 const dl = page.waitForEvent('download');
 await page.getByRole('button', { name: 'HTML' }).click();
-const file = await (await dl).path();
+// Saved to a stable path: a download's own temp file is not guaranteed to
+// outlive the handle, and the report has to be loaded back to be checked.
+const file = join(tmpdir(), 'awsome-verify-report.html');
+await (await dl).saveAs(file);
 const html = readFileSync(file, 'utf8');
 console.log('\nHTML export');
 check(html.includes('id="legend"'), 'the export carries the legend');
@@ -108,6 +112,41 @@ check(html.includes('lg-toggle'), 'the exported legend is expandable');
 check(/"r":"high"/.test(html), 'the export carries per-edge risk');
 check(html.includes('#f87171') && html.includes('#fbbf24'), 'the exported SVG uses the same risk colours');
 check(!html.includes('"__internet__":{'), 'origin nodes get no empty detail panel in the export');
+check(html.includes('id="t-drift"'), 'the export has a drift tab alongside diagram and findings');
+check(html.includes('class="stats"') && !html.includes('class="dnone"'),
+  'the drift tab carries a real comparison, fetched at export time if the overlay was never on');
+check(/<details class="rb/.test(html), 'drift resources expand without needing script');
+
+// the report must work with no server, no network and no build step
+const report = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+const offline = [];
+report.on('requestfailed', (r) => offline.push(r.url()));
+report.on('request', (r) => { if (!r.url().startsWith('file:')) offline.push(r.url()); });
+await report.goto(`file://${file}`);
+await report.waitForTimeout(500);
+check(offline.length === 0, `the exported report loads offline (${offline.length} external requests)`);
+
+for (const [tab, panel] of [['drift', '#drift'], ['findings', '#findings'], ['diagram', '#diagram']]) {
+  await report.locator(`#t-${tab}`).click();
+  await report.waitForTimeout(150);
+  const vis = await report.evaluate((sel) => {
+    const shown = ['#diagram', '#findings', '#drift'].filter((s) => getComputedStyle(document.querySelector(s)).display !== 'none');
+    return { shown, legend: document.getElementById('legend') ? getComputedStyle(document.getElementById('legend')).display : 'absent' };
+  }, panel);
+  check(vis.shown.length === 1 && vis.shown[0] === panel, `the ${tab} tab shows only ${tab}`);
+  check(tab === 'diagram' ? vis.legend !== 'none' : vis.legend === 'none',
+    `the legend ${tab === 'diagram' ? 'returns with' : 'leaves with'} the diagram`);
+}
+const drift = await report.evaluate(() => {
+  const el = document.querySelector('#drift .rb');
+  if (!el) return null;
+  el.querySelector('summary').click();
+  return { open: el.open, lines: el.querySelectorAll('.ln').length, stats: document.querySelectorAll('#drift .stat').length };
+});
+console.log('  drift tab:', JSON.stringify(drift));
+check(drift && drift.open && drift.lines > 0, 'a drift resource expands to its line diff');
+check(drift && drift.stats === 8, 'the drift tab carries the full count row');
+await report.close();
 
 // ---- component view must be untouched --------------------------------------
 await page.getByRole('button', { name: 'component', exact: true }).click();
