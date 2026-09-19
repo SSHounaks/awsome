@@ -722,8 +722,63 @@ const CLAIM_STYLE = {
     desc: "a role trust policy accepts this principal" },
   REACHES: { stroke: "#475569", width: 1, dash: "3 4", z: 3, opacity: 0.55,
     desc: "a security group would admit the traffic; nothing proves anything flows" },
+  // data-flow claims
+  ADMINS: { stroke: "#f87171", width: 1.8, dash: "", z: 8,
+    desc: "a wildcard action on this store — read, write and delete, including the audit trail" },
+  WRITES: { stroke: "#fb923c", width: 1.8, dash: "", z: 7,
+    desc: "can change what is stored here, not only read it" },
+  READS: { stroke: "#38bdf8", width: 1.4, dash: "", z: 5,
+    desc: "can read what is stored here" },
+  // network topology
+  ROUTES: { stroke: "#fbbf24", width: 1.6, dash: "", z: 6,
+    desc: "a route table on this subnet sends the default route to an internet gateway" },
 };
+// styleClaim turns a derived edge into a React Flow one. Solid for a real
+// dependency, faint dashes for mere reachability: the two make different claims
+// and should not look alike. Severity overrides the claim colour, because a line
+// that represents a way in should read as one before it reads as a category.
+function styleClaim(e) {
+  const c = CLAIM_STYLE[e.type] ?? { stroke: "#475569", width: 1.2, dash: "", z: 6 };
+  const risky = Boolean(RISK_STROKE[e.risk]);
+  const stroke = risky ? RISK_STROKE[e.risk] : c.stroke;
+  return {
+    id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
+    // React Flow's `type` is the renderer; keep the claim it represents, and how
+    // bad it is, so the SVG and HTML exports can match.
+    kind: e.type, risk: e.risk ?? null,
+    animated: e.type === "REFERENCES" || e.type === "TUNNELS",
+    markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 13, height: 13 },
+    style: {
+      stroke,
+      strokeWidth: risky ? c.width + 0.4 : c.width,
+      ...(c.dash ? { strokeDasharray: c.dash } : {}),
+      ...(c.opacity && !risky ? { opacity: c.opacity } : {}),
+    },
+    label: e.ports ? `:${e.ports}` : (e.count > 1 ? `×${e.count}` : undefined),
+    labelStyle: { fontSize: 9, fill: risky ? stroke : "#94a3b8" },
+    labelBgStyle: { fill: "#070b14", fillOpacity: 0.85 },
+    zIndex: risky ? 9 : c.z,
+  };
+}
+
 const ARCH_CLAIMS = Object.keys(CLAIM_STYLE);
+// Views whose edges are derived rather than collected. They share styling, the
+// legend, focus mode and the exports; only what they mean differs.
+const DERIVED_VIEWS = new Set(["arch", "dataflow", "attack", "network", "accounts"]);
+const DIAGRAM_VIEWS = ["component", "arch", "flow", "dataflow", "attack", "network", "accounts"];
+const VIEW_LABEL = {
+  component: "component", arch: "architecture", flow: "flow",
+  dataflow: "data", attack: "attack", network: "network", accounts: "accounts",
+};
+const VIEW_HINT = {
+  component: "Component view — VPC and subnet boundaries with resources nested inside (what runs where)",
+  arch: "Architecture view — request path by tier, one lane per account (what talks to what)",
+  flow: "Flow view — raw dependency graph, laid out left to right",
+  dataflow: "Data flow — which workloads can read, change or administer which stores, from the IAM actions they are granted",
+  attack: "Attack paths — routes from the internet to something worth reaching, worst first",
+  network: "Network topology — subnets by availability zone, public or private by whether a route reaches an internet gateway",
+  accounts: "Cross-account map — only what crosses an account boundary, and through what",
+};
 const RISK_STROKE = { high: "#f87171", medium: "#fbbf24" };
 const RISK_DESC = {
   high: "open to the internet, or a database port reachable from outside the VPC",
@@ -1059,7 +1114,7 @@ function deriveArchEdges(graph) {
 }
 
 function layoutTiered(graph, opts) {
-  const { overlayByKey, region, sources } = opts;
+  const { overlayByKey, region, sources, tiers = TIERS, origins } = opts;
   const appOf = makeAppOf(graph.nodes.map((n) => n.name));
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 
@@ -1074,7 +1129,7 @@ function layoutTiered(graph, opts) {
 
   const tierOf = (n) => {
     if (n.label === "IAMROLE") return inTrust.has(n.id) ? "identity" : null;
-    for (const t of TIERS) {
+    for (const t of tiers) {
       if (t.labels.includes(n.label)) return t.id;
     }
     return null;
@@ -1098,16 +1153,19 @@ function layoutTiered(graph, opts) {
 
   // Requests start somewhere. Without this the edge tier looks like an origin
   // rather than a boundary.
-  out.push({
-    id: INTERNET_ID, type: "aws", position: { x: 0, y: 0 },
-    style: { width: A_NODE_W, height: A_NODE_H }, width: A_NODE_W, height: A_NODE_H,
-    data: { name: "Internet", label: "PUBLIC", resourceLabel: "PUBLIC", accentColor: "#f87171", title: "Public internet" },
-  });
+  const wantInternet = origins !== false;
+  if (wantInternet) {
+    out.push({
+      id: INTERNET_ID, type: "aws", position: { x: 0, y: 0 },
+      style: { width: A_NODE_W, height: A_NODE_H }, width: A_NODE_W, height: A_NODE_H,
+      data: { name: "Internet", label: "PUBLIC", resourceLabel: "PUBLIC", accentColor: "#f87171", title: "Public internet" },
+    });
+  }
 
   // A range that reaches half the estate is one origin, not a hundred lines out
   // of a hundred boxes. Drawn beside the internet because it is the same kind of
   // thing: somewhere traffic comes from that is not a resource on the diagram.
-  let sx = A_NODE_W + A_GAP;
+  let sx = wantInternet ? A_NODE_W + A_GAP : 0;
   for (const s of sources ?? []) {
     out.push({
       id: s.id, type: "aws", position: { x: sx, y: 0 },
@@ -1120,11 +1178,11 @@ function layoutTiered(graph, opts) {
     });
     sx += A_NODE_W + A_GAP;
   }
-  laneY += A_NODE_H + 24;
+  if (wantInternet || sx > 0) laneY += A_NODE_H + 24;
 
   for (const acct of [...lanes.keys()].sort()) {
     const byTier = lanes.get(acct);
-    const boxes = TIERS.map((t) => {
+    const boxes = tiers.map((t) => {
       const items = byTier.get(t.id) ?? [];
       // A tier with 25 ECR repositories should not become a 25-row column while
       // the edge tier next to it holds three.
@@ -1272,22 +1330,42 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
 
   // Derived before layout, because the wide address ranges it finds become
   // origin nodes the layout has to place.
+  // The attack-path view walks the same derived edges the architecture view
+  // draws, so both need the derivation.
   const derivation = useMemo(
-    () => (view === "arch" ? deriveArchEdges(graph) : { edges: [], sources: [] }),
+    () => (view === "arch" || view === "attack" ? deriveArchEdges(graph) : { edges: [], sources: [] }),
     [view, graph],
   );
+  // The four extra views build their own nodes and edges together, because in
+  // each of them the layout depends on what the edges turned out to be.
+  const built = useMemo(() => {
+    const opts = { overlayByKey, region, findings, derived: derivation.edges };
+    if (view === "dataflow") return buildDataFlow(graph, opts);
+    if (view === "attack") return buildAttackPaths(graph, opts);
+    if (view === "network") return buildNetwork(graph, opts);
+    if (view === "accounts") return buildAccounts(graph, opts);
+    return null;
+  }, [view, graph, overlayByKey, region, findings, derivation]);
+
   const archNodes = useMemo(
     () =>
-      view === "component"
+      built
+        ? built.nodes
+        : view === "component"
         ? layoutArchitecture(graph, { overlayByKey, region })
         : view === "arch"
         ? layoutTiered(graph, { overlayByKey, region, sources: derivation.sources })
         : [],
-    [view, graph, overlayByKey, region, derivation],
+    [view, graph, overlayByKey, region, derivation, built],
   );
   const archEdges = useMemo(() => {
-    if (view !== "component" && view !== "arch") return [];
+    if (view === "flow" || view === "findings") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
+    // A view that builds its own edges has already decided what belongs; the
+    // collected graph edges would be about other nodes entirely.
+    if (built) {
+      return built.edges.filter((e) => drawn.has(e.from) && drawn.has(e.to)).map(styleClaim);
+    }
     const derived = derivation.edges;
     // An edge pointing at a container the source already sits inside (an
     // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
@@ -1301,36 +1379,10 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
       // The architecture view is about the request/trust path, so it draws only
       // edges that represent one; the component view keeps the rest.
       .filter((e) => view !== "arch" || ARCH_CLAIMS.includes(e.type))
-      .map((e) => {
-        // Solid for a real dependency, faint dashes for mere reachability: the
-        // two make different claims and should not look alike.
-        const c = CLAIM_STYLE[e.type] ?? { stroke: "#475569", width: 1.2, dash: "", z: 6 };
-        // Severity overrides the claim colour. A line that represents a way in
-        // should read as one before it reads as a category.
-        const risky = Boolean(RISK_STROKE[e.risk]);
-        const stroke = risky ? RISK_STROKE[e.risk] : c.stroke;
-        return {
-          id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
-          // React Flow's `type` is the renderer; keep the claim it represents,
-          // and how bad it is, so the SVG and HTML exports can match.
-          kind: e.type, risk: e.risk ?? null,
-          animated: e.type === "REFERENCES" || e.type === "TUNNELS",
-          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 13, height: 13 },
-          style: {
-            stroke,
-            strokeWidth: risky ? c.width + 0.4 : c.width,
-            ...(c.dash ? { strokeDasharray: c.dash } : {}),
-            ...(c.opacity && !risky ? { opacity: c.opacity } : {}),
-          },
-          label: e.ports ? `:${e.ports}` : (e.count > 1 ? `×${e.count}` : undefined),
-          labelStyle: { fontSize: 9, fill: risky ? stroke : "#94a3b8" },
-          labelBgStyle: { fill: "#070b14", fillOpacity: 0.85 },
-          zIndex: risky ? 9 : c.z,
-        };
-      });
-  }, [view, graph, archNodes, derivation]);
+      .map(styleClaim);
+  }, [view, graph, archNodes, derivation, built]);
 
-  const isArch = view === "component" || view === "arch";
+  const isLaidOut = view !== "flow";
   const [selected, setSelected] = useState(null);
 
   // ---- focus mode -----------------------------------------------------------
@@ -1360,9 +1412,9 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
 
   const DIM = 0.16;
   const focusedNodes = useMemo(() => {
-    // Architecture only. The component view answers "what runs where" and has no
-    // edges, so dimming by connectivity there fades the entire diagram.
-    if (view !== "arch") return archNodes;
+    // Derived views only. The component view answers "what runs where" and has
+    // no edges, so dimming by connectivity there fades the entire diagram.
+    if (!DERIVED_VIEWS.has(view)) return archNodes;
     return archNodes.map((n) => {
       if (n.type === "group") return n;
       // With a selection, anything off its connections recedes. Without one,
@@ -1374,7 +1426,7 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
   }, [view, archNodes, neighbourhood, connected]);
 
   const focusedEdges = useMemo(() => {
-    if (view !== "arch" || !neighbourhood) return archEdges;
+    if (!DERIVED_VIEWS.has(view) || !neighbourhood) return archEdges;
     return archEdges.map((e) =>
       neighbourhood.edges.has(e.id)
         ? { ...e, style: { ...(e.style ?? {}), opacity: 1, strokeWidth: (e.style?.strokeWidth ?? 1.4) + 0.6 }, animated: true }
@@ -1385,7 +1437,13 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
 
   // A node that vanishes between views (or between snapshots) must not leave a
   // stale panel open.
-  const nodeById = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
+  // Attack-path nodes are lane-local (`__path__0|arn:…`) so one resource can
+  // appear on several paths; the panel still has to find the real resource.
+  const realId = (id) => (String(id).includes("|") ? String(id).slice(String(id).indexOf("|") + 1) : id);
+  const nodeById = useMemo(() => {
+    const m = new Map(graph.nodes.map((n) => [n.id, n]));
+    return { get: (id) => m.get(id) ?? m.get(realId(id)), has: (id) => m.has(id) || m.has(realId(id)) };
+  }, [graph]);
   useEffect(() => { setSelected(null); }, [view]);
 
   const selectedNode = selected && nodeById.has(selected)
@@ -1401,21 +1459,456 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
 
   return h(ReactFlowProvider, null,
     h(FlowCanvas, {
-      nodes: isArch ? focusedNodes : layoutedNodes,
-      edges: isArch ? focusedEdges : allEdges,
+      nodes: isLaidOut ? focusedNodes : layoutedNodes,
+      edges: isLaidOut ? focusedEdges : allEdges,
       overlayByKey, COLORS, viewKey: view,
       onNodeClick,
       onPaneClick: () => setSelected(null),
       detail: h(DetailPanel, { node: selectedNode, findings, onClose: () => setSelected(null) }),
-      canExport: isArch,
+      canExport: isLaidOut,
       findings,
       ensureDrift,
       exportRef,
       nodeById: (id) => nodeById.get(id),
-      exportTitle: `AWS architecture${region ? ` — ${region}` : ""}`,
+      exportTitle: `AWS ${VIEW_LABEL[view] ?? view} diagram${region ? ` — ${region}` : ""}`,
       exportFooter: `${graph.nodes.length} resources · generated by AWSome`,
     }),
   );
+}
+
+/* ============================================================ */
+/*  ADDITIONAL VIEWS                                              */
+/*  Each builder answers one question the others cannot, and      */
+/*  returns { nodes, edges } in the same shape the architecture    */
+/*  view produces, so styling, focus and export apply unchanged.   */
+/* ============================================================ */
+
+const STORE_LABELS = ["S3BUCKET", "RDS", "DYNAMODBTABLE", "ELASTICACHE", "ECRREPOSITORY", "REDSHIFT", "OPENSEARCH"];
+const COMPUTE_LABELS = ["EC2", "LAMBDA", "ECSCLUSTER", "EKS", "ASG"];
+
+const DATA_TIERS = [
+  { id: "workload", title: "Workloads", hint: "what holds the credentials", labels: COMPUTE_LABELS },
+  { id: "store", title: "Data stores", hint: "what holds the data", labels: STORE_LABELS },
+];
+
+// Verb classification. An IAM action is `service:Verb…`, and the verb is what
+// decides whether a grant can read data, change it, or do anything at all.
+const WRITE_VERB = /^(Put|Post|Create|Update|Delete|Write|Upload|Copy|Restore|Abort|Complete|Replicate|Tag|Untag|Set|Modify|Import|Invalidate|Start|Stop|Run|Reboot|Attach|Detach|Associate|Disassociate|Add|Remove|Purge|Truncate|Register|Deregister)/;
+const READ_VERB = /^(Get|List|Describe|Query|Scan|Head|Select|Read|Batch(Get|Read)|Estimate|Preview|Search|Lookup|Discover)/;
+
+// grantsOn walks a policy document and reports what it permits on each resource
+// ARN it names, as a set of "read" | "write" | "admin".
+function grantsOn(doc) {
+  const out = new Map(); // arnRoot -> Set
+  let parsed;
+  try { parsed = JSON.parse(doc); } catch { return out; }
+  for (const st of (Array.isArray(parsed?.Statement) ? parsed.Statement : [])) {
+    if (String(st?.Effect ?? "").toLowerCase() !== "allow") continue;
+    const acts = Array.isArray(st.Action) ? st.Action : st.Action ? [st.Action] : [];
+    const res = Array.isArray(st.Resource) ? st.Resource : st.Resource ? [st.Resource] : [];
+    const kinds = new Set();
+    for (const a of acts) {
+      if (typeof a !== "string") continue;
+      const verb = a.includes(":") ? a.slice(a.indexOf(":") + 1) : a;
+      if (a === "*" || verb === "*") { kinds.add("admin"); continue; }
+      if (WRITE_VERB.test(verb)) kinds.add("write");
+      else if (READ_VERB.test(verb)) kinds.add("read");
+      else kinds.add("write"); // an unrecognised verb is assumed to be able to change something
+    }
+    if (!kinds.size) continue;
+    for (const r of res) {
+      if (typeof r !== "string" || r === "*" || !r.startsWith("arn:")) continue;
+      const k = arnRoot(r);
+      if (!out.has(k)) out.set(k, new Set());
+      for (const x of kinds) out.get(k).add(x);
+    }
+  }
+  return out;
+}
+
+// computeRoles maps each compute resource to the roles it runs as. Shared by
+// the data-flow view and anything else that needs "what can this host do".
+function computeRoles(graph) {
+  const profileRole = new Map();
+  for (const e of graph.edges) if (e.type === "HAS_ROLE") profileRole.set(e.from, e.to);
+  const rolesOf = new Map();
+  const add = (k, v) => { if (!rolesOf.has(k)) rolesOf.set(k, []); rolesOf.get(k).push(v); };
+  for (const e of graph.edges) {
+    if (e.type === "USES_ROLE") add(e.from, e.to);
+    if (e.type === "USES_PROFILE") { const r = profileRole.get(e.to); if (r) add(e.from, r); }
+  }
+  return rolesOf;
+}
+
+/* ---------- data flow ----------
+ * The architecture view says a workload uses a store. This one says what it is
+ * allowed to do with it, which is the difference between a reader and something
+ * that can delete the evidence.
+ */
+function buildDataFlow(graph, opts) {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const nodeByArn = new Map();
+  for (const n of graph.nodes) nodeByArn.set(arnRoot(n.id), n.id);
+
+  const policiesOf = new Map();
+  for (const e of graph.edges) {
+    if (e.type !== "USES_POLICY") continue;
+    if (!policiesOf.has(e.from)) policiesOf.set(e.from, []);
+    policiesOf.get(e.from).push(e.to);
+  }
+
+  const seen = new Map(); // "from->to" -> Set of kinds
+  for (const [compute, roles] of computeRoles(graph)) {
+    if (!byId.has(compute)) continue;
+    for (const role of roles) {
+      for (const pol of policiesOf.get(role) ?? []) {
+        const doc = byId.get(pol)?.properties?.document;
+        if (typeof doc !== "string") continue;
+        for (const [arn, kinds] of grantsOn(doc)) {
+          const target = nodeByArn.get(arn);
+          if (!target || target === compute) continue;
+          if (!STORE_LABELS.includes(byId.get(target)?.label)) continue;
+          const k = `${compute}->${target}`;
+          if (!seen.has(k)) seen.set(k, new Set());
+          for (const x of kinds) seen.get(k).add(x);
+        }
+      }
+    }
+  }
+
+  const edges = [];
+  for (const [k, kinds] of seen) {
+    const [from, to] = k.split("->");
+    const type = kinds.has("admin") ? "ADMINS" : kinds.has("write") ? "WRITES" : "READS";
+    const label = kinds.has("admin") ? "*" : (kinds.has("read") ? "r" : "") + (kinds.has("write") ? "w" : "");
+    edges.push({ from, to, type, ports: label, risk: kinds.has("admin") ? "high" : null });
+  }
+  return {
+    nodes: layoutTiered(graph, { ...opts, tiers: DATA_TIERS, origins: false, sources: [] }),
+    edges,
+  };
+}
+
+/* ---------- attack paths ----------
+ * Everything else draws the estate and leaves the reader to trace a route
+ * through it. This draws the routes: one lane per way in, each one a chain from
+ * the internet to something worth reaching.
+ */
+const ATTACK_MAX_PATHS = 10;
+const ATTACK_MAX_HOPS = 5;
+
+function buildAttackPaths(graph, opts) {
+  const { findings, derived } = opts;
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const worst = new Map(); // node -> severity rank
+  const SEV = { critical: 4, high: 3, medium: 2, low: 1 };
+  const ruleOn = new Map();
+  for (const f of findings ?? []) {
+    if (f.suppressed) continue;
+    const r = SEV[f.severity] ?? 0;
+    if (r > (worst.get(f.resource_key) ?? 0)) { worst.set(f.resource_key, r); ruleOn.set(f.resource_key, f.rule); }
+  }
+
+  const next = new Map();
+  for (const e of derived ?? []) {
+    if (!next.has(e.from)) next.set(e.from, []);
+    next.get(e.from).push(e);
+  }
+
+  // Depth-first from the internet, stopping at a data store or at the hop
+  // limit. Each distinct endpoint keeps only its shortest route: the point is
+  // how something is reached, not every way of reaching it.
+  const best = new Map();
+  const walk = (node, chain, visited) => {
+    if (chain.length > ATTACK_MAX_HOPS) return;
+    const label = byId.get(node)?.label;
+    if (chain.length && STORE_LABELS.includes(label)) {
+      const prev = best.get(node);
+      if (!prev || chain.length < prev.length) best.set(node, chain);
+      return;
+    }
+    for (const e of next.get(node) ?? []) {
+      if (visited.has(e.to)) continue;
+      walk(e.to, [...chain, e], new Set([...visited, e.to]));
+    }
+    // A chain that reaches compute and goes no further is still a way in.
+    if (chain.length && COMPUTE_LABELS.includes(label) && !best.has(node)) best.set(node, chain);
+  };
+  walk(INTERNET_ID, [], new Set([INTERNET_ID]));
+
+  const score = (chain) => chain.reduce((a, e) =>
+    a + (e.risk === "high" ? 3 : e.risk === "medium" ? 1 : 0) + (worst.get(e.to) ?? 0), 0);
+  const paths = [...best.values()].sort((a, b) => score(b) - score(a) || a.length - b.length)
+    .slice(0, ATTACK_MAX_PATHS);
+
+  // One lane per path, hops left to right.
+  const nodes = [];
+  const edges = [];
+  const W = A_NODE_W, H = A_NODE_H, GX = 64, GY = 26, PADX = 18, HEAD = 54;
+  let y = 0;
+  paths.forEach((chain, i) => {
+    const hops = [INTERNET_ID, ...chain.map((e) => e.to)];
+    const laneId = `__path__${i}`;
+    const laneW = PADX * 2 + hops.length * W + (hops.length - 1) * GX;
+    const sev = score(chain);
+    nodes.push({
+      id: laneId, type: "group", position: { x: 0, y },
+      style: { width: laneW, height: HEAD + H + 16 },
+      selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `Path ${i + 1} — ${hops.length - 1} hop${hops.length === 2 ? "" : "s"} to ${byId.get(hops[hops.length - 1])?.name ?? "?"}`,
+        subtitle: chain.map((e) => e.type.toLowerCase()).join(" → "),
+        fill: sev >= 6 ? "rgba(248,113,113,0.05)" : "rgba(148,163,184,0.04)",
+        stroke: sev >= 6 ? "#f87171" : sev >= 3 ? "#fbbf24" : "#475569",
+      },
+    });
+    hops.forEach((id, j) => {
+      const src = byId.get(id);
+      const ov = opts.overlayByKey?.get(id);
+      // A node can appear on more than one path, so ids are made lane-local.
+      nodes.push({
+        id: `${laneId}|${id}`, type: "aws", parentId: laneId, extent: "parent",
+        position: { x: PADX + j * (W + GX), y: HEAD },
+        style: { width: W, height: H }, width: W, height: H,
+        data: {
+          name: src?.name || (id === INTERNET_ID ? "Internet" : String(id).split("/").pop()),
+          label: ruleOn.get(id) ?? (src?.label ?? "PUBLIC"),
+          resourceLabel: src?.label ?? "PUBLIC",
+          icon: src ? iconFor(src.label, src.properties) : undefined,
+          accentColor: worst.get(id) >= 3 ? "#f87171" : worst.get(id) ? "#fbbf24" : (COLORS[src?.label] ?? "#475569"),
+          emphasised: Boolean(worst.get(id)) || Boolean(ov),
+          title: `${src?.name ?? "Internet"}\n${src?.label ?? ""}\n${id}`,
+        },
+      });
+      if (j) edges.push({ from: `${laneId}|${hops[j - 1]}`, to: `${laneId}|${id}`, type: chain[j - 1].type, ports: chain[j - 1].ports, risk: chain[j - 1].risk });
+    });
+    y += HEAD + H + 16 + GY;
+  });
+
+  if (!paths.length) {
+    nodes.push({
+      id: "__nopath__", type: "group", position: { x: 0, y: 0 },
+      style: { width: 560, height: 88 }, selectable: false, draggable: false,
+      data: { title: "No path found from the internet to a data store", subtitle: "Nothing admits an outside address, or nothing reachable leads anywhere", fill: "rgba(52,211,153,0.05)", stroke: "#34d399" },
+    });
+  }
+  return { nodes, edges };
+}
+
+/* ---------- network topology ----------
+ * Subnets grouped by availability zone, public or private by the only thing
+ * that actually decides it: whether a route table attached to the subnet has a
+ * route to an internet gateway.
+ */
+function buildNetwork(graph, opts) {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const subnets = graph.nodes.filter((n) => n.label === "SUBNET");
+  const vpcs = graph.nodes.filter((n) => n.label === "VPC");
+
+  // route table -> does it reach an internet gateway
+  const rtToIgw = new Map();
+  for (const e of graph.edges) {
+    if (e.type === "ROUTES_TO" && byId.get(e.to)?.label === "IGW") rtToIgw.set(e.from, e.to);
+  }
+  const rtOfSubnet = new Map();
+  for (const e of graph.edges) {
+    if (e.type === "APPLIES_TO" && byId.get(e.to)?.label === "SUBNET") {
+      if (!rtOfSubnet.has(e.to)) rtOfSubnet.set(e.to, []);
+      rtOfSubnet.get(e.to).push(e.from);
+    }
+  }
+  const igwOfVpc = new Map();
+  for (const e of graph.edges) {
+    if (e.type === "ATTACHED_TO" && byId.get(e.from)?.label === "IGW") igwOfVpc.set(e.to, e.from);
+  }
+  // what sits in each subnet, so a subnet is not an empty box
+  const tenants = new Map();
+  for (const e of graph.edges) {
+    if (e.type !== "IN_SUBNET") continue;
+    const l = byId.get(e.from)?.label;
+    if (l === "ENI") continue; // collapsed into their owners everywhere else
+    tenants.set(e.to, (tenants.get(e.to) ?? 0) + 1);
+  }
+
+  const publicSubnet = (id) => (rtOfSubnet.get(id) ?? []).some((rt) => rtToIgw.has(rt));
+
+  const nodes = [];
+  const edges = [];
+  const W = A_NODE_W, H = A_NODE_H, GAP = A_GAP, PADX = 16, VHEAD = 52, ZHEAD = 38, ZPAD = 14;
+  let vy = 0;
+
+  for (const vpc of [...vpcs].sort((a, b) => String(a.account_id).localeCompare(String(b.account_id)))) {
+    const mine = subnets.filter((s) => s.properties?.vpc_id === String(vpc.id).split("/").pop() ||
+      graph.edges.some((e) => e.type === "IN_VPC" && e.from === s.id && e.to === vpc.id));
+    if (!mine.length) continue;
+    const zones = new Map();
+    for (const s of mine) {
+      const az = s.properties?.az || "unknown";
+      if (!zones.has(az)) zones.set(az, []);
+      zones.get(az).push(s);
+    }
+    const zoneList = [...zones.keys()].sort();
+    const rows = Math.max(...zoneList.map((z) => zones.get(z).length));
+    const zoneW = W + ZPAD * 2;
+    const vpcW = PADX * 2 + zoneList.length * zoneW + (zoneList.length - 1) * GAP;
+    const zoneH = ZHEAD + rows * H + (rows - 1) * GAP + ZPAD;
+    const vpcH = VHEAD + zoneH + 16;
+
+    const igw = igwOfVpc.get(vpc.id);
+    nodes.push({
+      id: vpc.id, type: "group", position: { x: 0, y: vy },
+      style: { width: vpcW, height: vpcH }, selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `${vpc.name || String(vpc.id).split("/").pop()}   ${vpc.properties?.cidr_block ?? ""}`,
+        subtitle: `account ${vpc.account_id ?? "?"}${vpc.properties?.default_vpc === true || vpc.properties?.default_vpc === "true" ? "   ·   DEFAULT VPC" : ""}${igw ? "   ·   internet gateway attached" : "   ·   no internet gateway"}`,
+        fill: "rgba(99,102,241,0.04)", stroke: vpc.properties?.default_vpc === true || vpc.properties?.default_vpc === "true" ? "#fbbf24" : "#6366f1",
+      },
+    });
+
+    zoneList.forEach((az, zi) => {
+      const zid = `__az__${vpc.id}__${az}`;
+      nodes.push({
+        id: zid, type: "group", parentId: vpc.id, extent: "parent",
+        position: { x: PADX + zi * (zoneW + GAP), y: VHEAD },
+        style: { width: zoneW, height: zoneH }, selectable: false, draggable: false, zIndex: 1,
+        data: { title: az, subtitle: `${zones.get(az).length} subnet(s)`, fill: "rgba(148,163,184,0.04)", stroke: "#475569", borderStyle: "dashed", borderWidth: 1 },
+      });
+      zones.get(az).sort((a, b) => String(a.properties?.cidr_block).localeCompare(String(b.properties?.cidr_block)))
+        .forEach((s, si) => {
+          const pub = publicSubnet(s.id);
+          const n = tenants.get(s.id) ?? 0;
+          nodes.push({
+            id: s.id, type: "aws", parentId: zid, extent: "parent",
+            position: { x: ZPAD, y: ZHEAD + si * (H + GAP) },
+            style: { width: W, height: H }, width: W, height: H,
+            data: {
+              name: s.properties?.cidr_block || s.name,
+              label: `${pub ? "PUBLIC" : "private"} · ${n} resource${n === 1 ? "" : "s"}`,
+              resourceLabel: "SUBNET", icon: iconFor("SUBNET", s.properties),
+              accentColor: pub ? "#fbbf24" : "#38bdf8",
+              emphasised: pub,
+              title: `${s.properties?.cidr_block ?? ""}\n${pub ? "public — a route table on this subnet reaches an internet gateway" : "private"}\n${s.id}`,
+            },
+          });
+          if (pub && igw) edges.push({ from: igw, to: s.id, type: "ROUTES", ports: "0.0.0.0/0", risk: "medium" });
+        });
+    });
+
+    if (igw) {
+      nodes.push({
+        id: igw, type: "aws", position: { x: vpcW + 40, y: vy + VHEAD },
+        style: { width: W, height: H }, width: W, height: H,
+        data: { name: byId.get(igw)?.name || "internet gateway", label: "IGW", resourceLabel: "IGW", icon: iconFor("IGW", {}), accentColor: "#fbbf24", title: igw },
+      });
+    }
+    vy += vpcH + 30;
+  }
+  return { nodes, edges };
+}
+
+/* ---------- cross-account map ----------
+ * Only what crosses an account boundary. Everything inside one is the subject
+ * of every other view; the question here is which tenant can reach into which,
+ * and through what.
+ */
+function buildAccounts(graph, opts) {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const accounts = [...new Set(graph.nodes.map((n) => n.account_id).filter(Boolean))];
+  const acctOf = (id) => byId.get(id)?.account_id;
+
+  // Roles that take part in a trust crossing an account line, plus the grants
+  // that name an account we know about.
+  const crossing = [];
+  for (const e of graph.edges) {
+    if (e.type !== "TRUSTS") continue;
+    const a = acctOf(e.to), b = acctOf(e.from);
+    if (!a || !b || a === b) continue;
+    crossing.push({ from: e.to, to: e.from, kind: "TRUSTS" });
+  }
+  // A role whose trust policy names an outside account that is not in the
+  // snapshot is still a door; it just leads somewhere we cannot see.
+  const external = new Map();
+  for (const n of graph.nodes) {
+    if (n.label !== "IAMROLE") continue;
+    for (const p of (n.properties?.trusted_accounts ?? [])) {
+      const acct = String(p);
+      if (!acct || acct === n.account_id) continue;
+      if (!external.has(acct)) external.set(acct, []);
+      external.get(acct).push(n.id);
+    }
+  }
+
+  const involved = new Set();
+  for (const c of crossing) { involved.add(c.from); involved.add(c.to); }
+
+  // Order the accounts so trust flows left to right: the ones that only reach
+  // outwards first, the hub everything reaches into last. Otherwise half the
+  // lines double back on themselves and the shape is unreadable.
+  const flow = new Map(accounts.map((a) => [a, 0]));
+  for (const c of crossing) {
+    flow.set(acctOf(c.from), (flow.get(acctOf(c.from)) ?? 0) - 1);
+    flow.set(acctOf(c.to), (flow.get(acctOf(c.to)) ?? 0) + 1);
+  }
+  accounts.sort((a, b) => (flow.get(a) ?? 0) - (flow.get(b) ?? 0) || a.localeCompare(b));
+
+  const nodes = [];
+  const edges = [];
+  const W = A_NODE_W, H = A_NODE_H, GAP = A_GAP, PADX = 18, HEAD = 56;
+  let ax = 0;
+  for (const acct of accounts) {
+    const roles = graph.nodes.filter((n) => n.account_id === acct && involved.has(n.id));
+    const inv = graph.nodes.filter((n) => n.account_id === acct).length;
+    const rows = Math.max(1, roles.length);
+    const boxW = PADX * 2 + W;
+    const boxH = HEAD + rows * H + (rows - 1) * GAP + 16;
+    nodes.push({
+      id: `__acct__${acct}`, type: "group", position: { x: ax, y: 0 },
+      style: { width: boxW, height: boxH }, selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: `Account ${acct}`,
+        subtitle: `${inv} resources   ·   ${roles.length} crossing role(s)`,
+        fill: "rgba(99,102,241,0.04)", stroke: roles.length ? "#6366f1" : "#334155",
+      },
+    });
+    roles.forEach((r, i) => {
+      nodes.push({
+        id: r.id, type: "aws", parentId: `__acct__${acct}`, extent: "parent",
+        position: { x: PADX, y: HEAD + i * (H + GAP) },
+        style: { width: W, height: H }, width: W, height: H,
+        data: {
+          name: r.name || String(r.id).split("/").pop(), label: "IAMROLE", resourceLabel: "IAMROLE",
+          icon: iconFor("IAMROLE", r.properties), accentColor: COLORS.IAMROLE ?? "#a78bfa",
+          title: `${r.name}\n${r.id}`,
+        },
+      });
+    });
+    if (!roles.length) {
+      nodes.push({
+        id: `__acct__${acct}__none`, type: "aws", parentId: `__acct__${acct}`, extent: "parent",
+        position: { x: PADX, y: HEAD },
+        style: { width: W, height: H }, width: W, height: H,
+        data: { name: "nothing crosses in or out", label: "", resourceLabel: "", accentColor: "#334155" },
+      });
+    }
+    ax += boxW + 120;
+  }
+  for (const c of crossing) edges.push({ from: c.from, to: c.to, type: "TRUSTS", risk: "medium" });
+
+  // Accounts named in a trust policy that were never scanned.
+  let uy = 0;
+  for (const [acct, roles] of external) {
+    if (accounts.includes(acct)) continue;
+    const id = `__ext__${acct}`;
+    nodes.push({
+      id, type: "aws", position: { x: ax, y: uy },
+      style: { width: W, height: H }, width: W, height: H,
+      data: { name: acct, label: "UNSCANNED ACCOUNT", resourceLabel: "PUBLIC", accentColor: "#f87171",
+        title: `${acct}\nnamed in a trust policy but never scanned` },
+    });
+    for (const r of roles) edges.push({ from: id, to: r, type: "TRUSTS", risk: "high" });
+    uy += H + GAP;
+  }
+  return { nodes, edges };
 }
 
 /* ---------- SVG export ----------
@@ -1565,6 +2058,80 @@ function architectureSvg(nodes, edges, meta) {
   );
 
   return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">\n${parts.join("\n")}\n</svg>\n`;
+}
+
+/* ---------- Mermaid export ----------
+ * Text the diagram can be rebuilt from: renders in GitHub, Confluence and
+ * Notion, diffs in git, and can be edited after the fact. It gives up the AWS
+ * iconography and the exact layout — Mermaid does its own — so it complements
+ * the SVG rather than replacing it.
+ */
+function architectureMermaid(nodes, edges, meta) {
+  const ids = new Map();
+  const mid = (id) => {
+    if (!ids.has(id)) ids.set(id, `n${ids.size}`);
+    return ids.get(id);
+  };
+  // Mermaid labels are quoted strings; quotes and newlines inside them end the
+  // label early, and `#` starts an entity.
+  const lbl = (s) => String(s ?? "").replace(/["\n\r]/g, " ").replace(/#/g, "&num;").trim();
+
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const children = new Map();
+  for (const n of nodes) {
+    const p = n.parentId && byId.has(n.parentId) ? n.parentId : "";
+    if (!children.has(p)) children.set(p, []);
+    children.get(p).push(n);
+  }
+
+  const out = [];
+  const classes = [];
+  const shape = (n) => {
+    const name = lbl(n.data?.name ?? String(n.id).split("/").pop());
+    const sub = lbl(n.data?.label ?? "");
+    const text = sub ? `${name}<br/>${sub}` : name;
+    if (String(n.id).startsWith("__")) return `(["${text}"])`;          // an origin, not a resource
+    if (STORE_LABELS.includes(n.data?.resourceLabel)) return `[("${text}")]`; // a store
+    return `["${text}"]`;
+  };
+
+  const emit = (parent, depth) => {
+    const pad = "  ".repeat(depth + 1);
+    for (const n of children.get(parent) ?? []) {
+      if (n.type === "group") {
+        const title = lbl(n.data?.title ?? "group");
+        const sub = lbl(n.data?.subtitle ?? "");
+        out.push(`${pad}subgraph ${mid(n.id)}["${sub ? `${title} — ${sub}` : title}"]`);
+        emit(n.id, depth + 1);
+        out.push(`${pad}end`);
+      } else {
+        out.push(`${pad}${mid(n.id)}${shape(n)}`);
+        const accent = n.data?.accentColor;
+        if (accent) classes.push(`  style ${mid(n.id)} fill:#0d1320,stroke:${accent},color:#e2e8f0`);
+      }
+    }
+  };
+
+  out.push(`%% ${lbl(meta.title)}`);
+  if (meta.footer) out.push(`%% ${lbl(meta.footer)}`);
+  out.push("flowchart LR");
+  emit("", 0);
+
+  const linkStyles = [];
+  let li = 0;
+  for (const e of edges ?? []) {
+    if (!ids.has(e.source) && !byId.has(e.source)) continue;
+    if (!byId.has(e.source) || !byId.has(e.target)) continue;
+    const c = CLAIM_STYLE[e.kind] ?? { stroke: "#475569", width: 1.2, dash: "" };
+    const risky = Boolean(RISK_STROKE[e.risk]);
+    const stroke = risky ? RISK_STROKE[e.risk] : c.stroke;
+    const arrow = c.dash ? "-.->" : "-->";
+    const text = e.label ? `|"${lbl(e.label)}"|` : "";
+    out.push(`  ${mid(e.source)} ${arrow}${text} ${mid(e.target)}`);
+    linkStyles.push(`  linkStyle ${li} stroke:${stroke},stroke-width:${risky ? 2.4 : c.width}px`);
+    li++;
+  }
+  return [...out, ...classes, ...linkStyles].join("\n") + "\n";
 }
 
 /* ---------- drift section of the HTML export ----------
@@ -2008,7 +2575,10 @@ function Legend({ view, edges }) {
   const [open, setOpen] = useState(false);
 
   const groups = useMemo(() => {
-    const rows = view === "arch"
+    // Every derived view styles its edges from the same table, so the legend
+    // reads the diagram rather than the view name: whatever claims are on
+    // screen are the ones explained.
+    const rows = DERIVED_VIEWS.has(view)
       ? [
           ...[...new Set(edges.map((e) => e.kind))].filter((k) => CLAIM_STYLE[k]).map((k) => ({
             group: "what the lines mean", name: k.toLowerCase(), width: 1.8,
@@ -2124,13 +2694,20 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, 
     URL.revokeObjectURL(url);
   }
 
+  const exportMermaid = () => {
+    download(architectureMermaid(nodes, edges, {
+      title: exportTitle ?? "AWS architecture",
+      footer: exportFooter ?? "",
+    }), "text/vnd.mermaid", "mmd");
+  };
+
   // The export controls live in the toolbar with the other view controls, not
   // floating over the diagram where they covered it and were easy to miss. The
   // handlers have to stay here, where the laid-out nodes and the rendered icon
   // glyphs are, so they are published upward rather than lifted.
   useEffect(() => {
     if (!exportRef) return;
-    exportRef.current = canExport ? { svg: exportSvg, html: exportHtml } : null;
+    exportRef.current = canExport ? { svg: exportSvg, html: exportHtml, mmd: exportMermaid } : null;
     return () => { exportRef.current = null; };
   });
 
@@ -3397,19 +3974,15 @@ function App() {
         pane("summary", h(Summary, { summary, findingsData: findings, jobs, go })),
         pane("diagram",
           h("div", { className: "flex h-full min-h-0 flex-col" },
-            h("div", { className: "flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2" },
+            h("div", { className: "flex shrink-0 flex-wrap items-center gap-2 border-b border-white/10 px-4 py-2" },
               h("div", { className: "flex items-center gap-1 rounded-lg border border-white/10 p-0.5" },
-                ["component", "arch", "flow"].map((v) =>
+                DIAGRAM_VIEWS.map((v) =>
                   h("button", {
                     key: v,
                     className: cx("toggle border-0", diagView === v ? "toggle-on" : "toggle-off"),
                     onClick: () => setDiagView(v),
-                    title: v === "component"
-                      ? "Component view — VPC and subnet boundaries with resources nested inside (what runs where)"
-                      : v === "arch"
-                      ? "Architecture view — request path by tier, one lane per account (what talks to what)"
-                      : "Flow view — raw dependency graph, laid out left to right",
-                  }, v === "arch" ? "architecture" : v)
+                    title: VIEW_HINT[v],
+                  }, VIEW_LABEL[v])
                 ),
               ),
               h("button", { className: cx("toggle", showFindings ? "toggle-on" : "toggle-off"), onClick: toggleFindings },
@@ -3436,13 +4009,18 @@ function App() {
                 : null,
               // Only the two laid-out views have something worth exporting; the
               // flow view is a dependency graph, not a document.
-              (diagView === "component" || diagView === "arch")
+              (diagView !== "flow")
                 ? h(Fragment, null,
                     h("button", {
                       className: "toggle toggle-off", disabled: Boolean(exportBusy),
                       onClick: () => runExport("svg"),
                       title: "Download this diagram as a standalone SVG",
                     }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), exportBusy === "svg" ? "\u2026" : ".svg"),
+                    h("button", {
+                      className: "toggle toggle-off", disabled: Boolean(exportBusy),
+                      onClick: () => runExport("mmd"),
+                      title: "Download Mermaid source — renders in GitHub and Confluence, diffs in git, editable afterwards",
+                    }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), exportBusy === "mmd" ? "\u2026" : ".mmd"),
                     h("button", {
                       className: "toggle toggle-off", disabled: Boolean(exportBusy),
                       onClick: () => runExport("html"),

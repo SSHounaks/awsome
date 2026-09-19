@@ -1,6 +1,7 @@
 // Asserts the architecture view draws the paths that bypass the exposure chain,
-// that risk is legible as colour, and that the legend and the HTML export agree
-// with the canvas. Exits non-zero on any violation.
+// that risk is legible as colour, that every view renders and exports Mermaid
+// that parses, and that the legend and the HTML export agree with the canvas.
+// Exits non-zero on any violation.
 //
 //   node scripts/verify-arch-edges.mjs
 
@@ -147,6 +148,58 @@ console.log('  drift tab:', JSON.stringify(drift));
 check(drift && drift.open && drift.lines > 0, 'a drift resource expands to its line diff');
 check(drift && drift.stats === 8, 'the drift tab carries the full count row');
 await report.close();
+
+// ---- every view renders, and exports to text that actually parses ----------
+console.log('\nall views');
+const VIEWS = {
+  component: { minNodes: 100, edges: 'none' },
+  architecture: { minNodes: 100, edges: 'some' },
+  flow: { minNodes: 100, edges: 'some' },
+  data: { minNodes: 50, edges: 'some' },
+  attack: { minNodes: 5, edges: 'some' },
+  network: { minNodes: 20, edges: 'some' },
+  accounts: { minNodes: 3, edges: 'some' },
+};
+const pageErrors = [];
+page.on('pageerror', (e) => pageErrors.push(e.message.split('\n')[0]));
+const mermaid = {};
+for (const [v, want] of Object.entries(VIEWS)) {
+  await page.getByRole('button', { name: v, exact: true }).click();
+  await page.waitForTimeout(2600);
+  const r = await page.evaluate(() => ({
+    nodes: document.querySelectorAll('.react-flow__node').length,
+    edges: document.querySelectorAll('.react-flow__edge-path').length,
+  }));
+  console.log(`  ${v.padEnd(12)} nodes=${String(r.nodes).padStart(4)}  edges=${String(r.edges).padStart(4)}`);
+  check(r.nodes >= want.minNodes, `the ${v} view draws at least ${want.minNodes} nodes`);
+  check(want.edges === 'none' ? r.edges === 0 : r.edges > 0, `the ${v} view draws ${want.edges === 'none' ? 'no' : 'some'} edges`);
+  if (v === 'flow') continue; // a dependency dump, not a document
+  const md = page.waitForEvent('download');
+  await page.getByRole('button', { name: '.mmd', exact: true }).click();
+  const f = join(tmpdir(), `awsome-verify-${v}.mmd`);
+  await (await md).saveAs(f);
+  mermaid[v] = readFileSync(f, 'utf8');
+}
+check(pageErrors.length === 0, `no view throws (${pageErrors.slice(0, 2).join(' / ') || 'clean'})`);
+
+// Mermaid that does not parse is not an export, it is a text file.
+const mm = await browser.newPage();
+await mm.setContent('<div></div>');
+const loaded = await mm.evaluate(async () => {
+  try { window.__m = (await import('https://esm.sh/mermaid@11')).default; return true; } catch (e) { return String(e.message); }
+});
+if (loaded !== true) {
+  console.log(`  (skipped Mermaid parse check — could not load the parser: ${loaded})`);
+} else {
+  for (const [v, src] of Object.entries(mermaid)) {
+    const r = await mm.evaluate(async (s) => {
+      window.__m.initialize({ startOnLoad: false, securityLevel: 'loose' });
+      try { await window.__m.parse(s); return true; } catch (e) { return String(e.message || e).split('\n')[0]; }
+    }, src);
+    check(r === true, `the ${v} view exports Mermaid that parses${r === true ? '' : ` — ${r}`}`);
+  }
+}
+await mm.close();
 
 // ---- component view must be untouched --------------------------------------
 await page.getByRole('button', { name: 'component', exact: true }).click();
