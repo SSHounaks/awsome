@@ -151,6 +151,7 @@ const ICONS = {
   stop: { rects: [[6, 4, 12, 14]], fill: true },
   box: { paths: ["M21 8l-9-5-9 5v8l9 5 9-5V8z", "M3 8l9 5 9-5", "M12 13v8"] },
   zap: { paths: ["M13 2L3 14h7l-1 8 11-12h-7l1-8z"], fill: true },
+  info: { circles: [[12, 12, 9]], paths: ["M12 11v5", "M12 8h.01"] },
 };
 
 function Icon({ name, className }) {
@@ -626,11 +627,108 @@ const TIERS = [
 const A_LANE_HEAD2 = 52, A_TIER_HEAD = 40, A_TIER_PADX = 16, A_TIER_PADB = 16;
 
 // ---- architecture edge derivation -------------------------------------------
-// Three different claims, kept distinct because they mean different things:
+// Five different claims, kept distinct because they mean different things:
 //   USES    — an IAM policy names this resource, so the caller genuinely uses it
-//   REACHES — a security group admits the traffic, so it *could* talk to it
 //   FORWARDS— a load balancer sends requests here
+//   ADMITS  — a security group lets an address outside the VPC open a connection
+//   TUNNELS — reachable from outside with no inbound rule at all
+//   REACHES — a security group admits the traffic, so it *could* talk to it
 const INTERNET_ID = "__internet__";
+const CIDR_PREFIX = "__cidr__";
+
+// Ports whose exposure changes what an edge means, mirroring the scanner's
+// sensitivePorts and databasePorts so the diagram and the findings cannot
+// disagree about which paths are the dangerous ones.
+const ADMIN_PORTS = new Set([22, 23, 135, 445, 3389, 5985, 5986]);
+const DATA_PORTS = new Set([1433, 1521, 3306, 5432, 5984, 6379, 7000, 9042, 9200, 11211, 27017]);
+const FRONT_DOOR_PORTS = new Set([80, 443]);
+
+function ipToInt(ip) {
+  const parts = String(ip).split(".");
+  if (parts.length !== 4) return null;
+  let v = 0;
+  for (const o of parts) {
+    const n = Number(o);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    v = v * 256 + n;
+  }
+  return v;
+}
+
+// cidrRange returns the inclusive address range a CIDR covers, or null for
+// anything that is not parseable IPv4 — IPv6 rules are classified by their
+// prefix rather than matched against addresses.
+function cidrRange(c) {
+  const [base, bitsRaw] = String(c).split("/");
+  const b = ipToInt(base);
+  if (b === null) return null;
+  const bits = bitsRaw === undefined ? 32 : Number(bitsRaw);
+  if (!Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const size = 2 ** (32 - bits);
+  const start = Math.floor(b / size) * size;
+  return [start, start + size - 1];
+}
+
+const isWorldCIDR = (c) => c === "0.0.0.0/0" || c === "::/0";
+const isPrivateCIDR = (c) =>
+  /^10\./.test(c) || /^192\.168\./.test(c) || /^172\.(1[6-9]|2\d|3[01])\./.test(c);
+
+// Neo4j cannot store a nested map, so security-group rules arrive as an array
+// of JSON strings. Parsing in one place keeps every caller from having to know
+// that — and iterating the raw array gets you characters, silently.
+function parseRules(node, key) {
+  const raw = node?.properties?.[key];
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const r of raw) {
+    if (r && typeof r === "object") { out.push(r); continue; }
+    if (typeof r !== "string") continue;
+    try { out.push(JSON.parse(r)); } catch { /* a rule we cannot read is not a rule we can draw */ }
+  }
+  return out;
+}
+
+// ruleSpan reads a rule's port range. `null` ports mean every port, which is
+// how an all-protocol rule is recorded.
+function ruleSpan(r) {
+  const from = r?.from, to = r?.to;
+  if (from === null || from === undefined || r?.protocol === "-1") return { all: true, from: 0, to: 65535 };
+  const f = Number(from), t = Number(to === null || to === undefined ? from : to);
+  if (!Number.isFinite(f) || !Number.isFinite(t)) return { all: true, from: 0, to: 65535 };
+  return { all: f === 0 && t === 65535, from: f, to: t };
+}
+
+const spanLabel = (s) => (s.all ? "all" : s.from === s.to ? String(s.from) : `${s.from}-${s.to}`);
+const spanHits = (s, set) => {
+  if (s.all) return true;
+  for (const p of set) if (p >= s.from && p <= s.to) return true;
+  return false;
+};
+
+// One table, so the canvas, the SVG export and the legend cannot drift apart.
+// Form carries the claim; colour carries the claim until risk overrides it.
+const CLAIM_STYLE = {
+  TUNNELS: { stroke: "#f87171", width: 1.8, dash: "2 3", z: 8,
+    desc: "reached from outside with no inbound rule at all — an outbound-established path" },
+  // Pink, not amber: amber means medium risk here, and a colour that means two
+  // things means neither.
+  ADMITS: { stroke: "#f472b6", width: 1.6, dash: "", z: 7,
+    desc: "a security group lets an address outside the VPC open a connection" },
+  USES: { stroke: "#34d399", width: 1.8, dash: "", z: 6,
+    desc: "an IAM policy names this resource — a dependency that is real, not merely possible" },
+  FORWARDS: { stroke: "#38bdf8", width: 1.8, dash: "", z: 6,
+    desc: "a load balancer sends requests here" },
+  TRUSTS: { stroke: "#a78bfa", width: 1.4, dash: "5 4", z: 6,
+    desc: "a role trust policy accepts this principal" },
+  REACHES: { stroke: "#475569", width: 1, dash: "3 4", z: 3, opacity: 0.55,
+    desc: "a security group would admit the traffic; nothing proves anything flows" },
+};
+const ARCH_CLAIMS = Object.keys(CLAIM_STYLE);
+const RISK_STROKE = { high: "#f87171", medium: "#fbbf24" };
+const RISK_DESC = {
+  high: "open to the internet, or a database port reachable from outside the VPC",
+  medium: "an allowlisted external address, or an all-ports rule across an internal range",
+};
 
 // resourceARNsIn pulls the resource ARNs a policy document grants on. Wildcards
 // name no specific resource, so they are skipped rather than linked to
@@ -765,22 +863,22 @@ function deriveArchEdges(graph) {
 
   // --- 2. security-group reachability, with the port that permits it -------
   const members = new Map();
+  const sgsOf = new Map();
   for (const e of graph.edges) {
     if (e.type !== "ASSOC_WITH" || label(e.to) !== "SG") continue;
     if (!members.has(e.to)) members.set(e.to, []);
     members.get(e.to).push(e.from);
+    const owner = resolve(e.from);
+    if (!sgsOf.has(owner)) sgsOf.set(owner, []);
+    sgsOf.get(owner).push(e.to);
   }
   // which ports a group's rules open to a peer group
   const portsFor = (sgId, peerId) => {
-    const rules = byId.get(sgId)?.properties?.ingress_rules;
-    if (!Array.isArray(rules)) return "";
     const peerShort = String(peerId).split("/").pop();
     const hits = [];
-    for (const r of rules) {
+    for (const r of parseRules(byId.get(sgId), "ingress_rules")) {
       if (r?.source_sg !== peerShort) continue;
-      const from = r.from, to = r.to;
-      if (from === null || from === undefined) hits.push("all");
-      else hits.push(from === to ? String(from) : `${from}-${to}`);
+      hits.push(spanLabel(ruleSpan(r)));
     }
     return [...new Set(hits)].slice(0, 3).join(",");
   };
@@ -794,36 +892,174 @@ function deriveArchEdges(graph) {
     }
   }
 
-  // --- 3. request path through the load balancer ---------------------------
+  // --- 3. what the address-range rules admit -------------------------------
+  // Section 2 sees group-to-group references only. That is the well-structured
+  // pattern — and it is precisely the one the flat, permissive rules do not
+  // use, so a diagram built from it alone draws the careful paths and hides the
+  // careless ones. These are the rest: every ingress rule written as a CIDR.
+  const ipOwners = [];
+  for (const n of graph.nodes) {
+    const p = n.properties ?? {};
+    if (n.label === "ENI" && p.primary_ip) ipOwners.push([ipToInt(p.primary_ip), resolve(n.id)]);
+    else if (p.private_ip) ipOwners.push([ipToInt(p.private_ip), n.id]);
+  }
+  // Which resources hold an address inside a range. Cached, because the same
+  // handful of ranges appears on rule after rule.
+  const rangeCache = new Map();
+  const ownersIn = (cidr) => {
+    if (rangeCache.has(cidr)) return rangeCache.get(cidr);
+    const range = cidrRange(cidr);
+    const hit = [];
+    if (range) {
+      for (const [ip, owner] of ipOwners) {
+        if (ip !== null && ip >= range[0] && ip <= range[1]) hit.push(owner);
+      }
+    }
+    const uniq = [...new Set(hit)];
+    rangeCache.set(cidr, uniq);
+    return uniq;
+  };
+  // Does this resource have a rule naming this specific port? Used to turn "may
+  // reach the whole range on 8088" into "reaches the things that serve 8088".
+  // All-port rules are deliberately not a match: they would make every host in
+  // the range answer for every port and put the fan-out straight back.
+  const servesPort = (ownerId, port) => {
+    for (const sgId of sgsOf.get(ownerId) ?? []) {
+      for (const r of parseRules(byId.get(sgId), "ingress_rules")) {
+        const s = ruleSpan(r);
+        if (!s.all && port >= s.from && port <= s.to) return true;
+      }
+    }
+    return false;
+  };
+
+  // A range covering more than a handful of resources is drawn as one source
+  // node rather than as a line per resource: "everything in this range reaches
+  // this" is the claim, and a line per address states it far less clearly.
+  const CIDR_FANOUT_MAX = 4;
+  const sources = new Map();
+
+  for (const sgId of members.keys()) {
+    const targets = [...new Set((members.get(sgId) ?? []).map(resolve))];
+    for (const r of parseRules(byId.get(sgId), "ingress_rules")) {
+      const cidr = typeof r?.cidr === "string" ? r.cidr : "";
+      if (!cidr) continue;
+      const span = ruleSpan(r);
+      const ports = spanLabel(span);
+
+      if (isWorldCIDR(cidr) || !isPrivateCIDR(cidr)) {
+        // Admission from outside the VPC. A load balancer on 80/443 is the
+        // intended front door; anything else is a resource answering an outside
+        // address directly, and an allowlist is better than none but is still
+        // an open door on somebody else's network.
+        const world = isWorldCIDR(cidr);
+        for (const t of targets) {
+          const frontDoor = label(t) === "LB" && spanHits(span, FRONT_DOOR_PORTS) &&
+            !span.all && !spanHits(span, ADMIN_PORTS) && !spanHits(span, DATA_PORTS);
+          // An allowlist is better than none, but a database port reachable
+          // from outside the VPC is the data tier answering the boundary
+          // directly, allowlist or not.
+          const risk = frontDoor ? null : world || spanHits(span, DATA_PORTS) ? "high" : "medium";
+          push(INTERNET_ID, t, "ADMITS", { ports, cidr, risk });
+        }
+        continue;
+      }
+
+      // An internal range: lateral reach. An all-port rule collapses the
+      // segmentation every other group provides, so it is graded, not just drawn.
+      const risk = span.all ? "medium" : null;
+      const owners = ownersIn(cidr).filter((o) => !targets.includes(o));
+      if (owners.length > CIDR_FANOUT_MAX) {
+        const id = CIDR_PREFIX + cidr;
+        sources.set(id, { id, cidr, count: owners.length });
+        for (const t of targets) push(id, t, "REACHES", { ports, cidr, risk });
+        continue;
+      }
+      for (const o of owners) {
+        for (const t of targets) push(o, t, "REACHES", { ports, cidr, risk });
+      }
+    }
+  }
+
+  // --- 4. paths that leave no inbound rule at all --------------------------
+  // A group that admits nothing, dials the internet, and can also reach
+  // internal service ports is the shape of an outbound-established tunnel. The
+  // session is opened outbound, so there is no ingress rule to draw — which is
+  // exactly why this one has to be derived from egress, and why a diagram that
+  // reads ingress alone shows the services behind it as unreachable.
+  for (const sgId of members.keys()) {
+    const sg = byId.get(sgId);
+    const ingress = parseRules(sg, "ingress_rules");
+    const egress = parseRules(sg, "egress_rules");
+    if (!egress.length || ingress.length) continue;
+
+    let worldOut = false;
+    const servicePorts = [];
+    const ranges = [];
+    for (const r of egress) {
+      const cidr = typeof r?.cidr === "string" ? r.cidr : "";
+      if (!cidr) continue;
+      if (isWorldCIDR(cidr)) { worldOut = true; continue; }
+      if (!isPrivateCIDR(cidr)) continue;
+      const span = ruleSpan(r);
+      if (span.all || span.from !== span.to || span.from < 1024) continue;
+      servicePorts.push(span.from);
+      ranges.push(cidr);
+    }
+    if (!worldOut || !servicePorts.length) continue;
+
+    const ports = [...new Set(servicePorts)].sort((a, b) => a - b).slice(0, 3).join(",");
+    const hosts = [...new Set((members.get(sgId) ?? []).map(resolve))];
+    for (const host of hosts) {
+      push(INTERNET_ID, host, "TUNNELS", { ports, risk: "high" });
+      // and on to whatever actually serves those ports inside the range
+      for (const cidr of new Set(ranges)) {
+        for (const o of ownersIn(cidr)) {
+          if (hosts.includes(o)) continue;
+          for (const p of new Set(servicePorts)) {
+            if (servesPort(o, p)) push(host, o, "TUNNELS", { ports: String(p), risk: "high" });
+          }
+        }
+      }
+    }
+  }
+
+  // --- 5. request path through the load balancer ---------------------------
   for (const e of graph.edges) {
     if (e.type === "FORWARDS") push(resolve(e.from), resolve(e.to), "FORWARDS");
   }
 
-  // --- 4. the internet, so the diagram starts where requests do ------------
+  // --- 6. the internet, so the diagram starts where requests do ------------
   for (const n of graph.nodes) {
     if (n.label !== "LB") continue;
     if (String(n.properties?.scheme ?? "") !== "internet-facing") continue;
     push(INTERNET_ID, n.id, "FORWARDS");
   }
 
-  // --- 5. bundle: one line per pair, carrying how many grants it represents -
+  // --- 7. bundle: one line per pair, carrying how many grants it represents -
+  const RANK = { TUNNELS: 5, USES: 4, ADMITS: 3, FORWARDS: 2, REACHES: 1 };
+  const RISK = { high: 2, medium: 1 };
   const bundled = new Map();
   for (const e of edges) {
     const k = `${e.from}->${e.to}`;
     const prev = bundled.get(k);
-    // A real dependency outranks mere reachability between the same two nodes.
-    const rank = { USES: 3, FORWARDS: 2, REACHES: 1 };
-    if (!prev || rank[e.type] > rank[prev.type]) {
-      bundled.set(k, { ...e, count: (prev?.count ?? 0) + 1 });
+    if (!prev) { bundled.set(k, { ...e, count: 1 }); continue; }
+    // A real dependency outranks mere reachability between the same two nodes —
+    // but the worst risk among them is what the line should be coloured by,
+    // whichever claim ends up drawn.
+    const risk = (RISK[e.risk] ?? 0) > (RISK[prev.risk] ?? 0) ? e.risk : prev.risk;
+    if ((RANK[e.type] ?? 0) > (RANK[prev.type] ?? 0)) {
+      bundled.set(k, { ...e, risk, count: prev.count + 1 });
     } else {
-      prev.count = (prev.count ?? 1) + 1;
+      prev.risk = risk;
+      prev.count += 1;
     }
   }
-  return [...bundled.values()];
+  return { edges: [...bundled.values()], sources: [...sources.values()] };
 }
 
 function layoutTiered(graph, opts) {
-  const { overlayByKey, region } = opts;
+  const { overlayByKey, region, sources } = opts;
   const appOf = makeAppOf(graph.nodes.map((n) => n.name));
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 
@@ -867,6 +1103,23 @@ function layoutTiered(graph, opts) {
     style: { width: A_NODE_W, height: A_NODE_H }, width: A_NODE_W, height: A_NODE_H,
     data: { name: "Internet", label: "PUBLIC", resourceLabel: "PUBLIC", accentColor: "#f87171", title: "Public internet" },
   });
+
+  // A range that reaches half the estate is one origin, not a hundred lines out
+  // of a hundred boxes. Drawn beside the internet because it is the same kind of
+  // thing: somewhere traffic comes from that is not a resource on the diagram.
+  let sx = A_NODE_W + A_GAP;
+  for (const s of sources ?? []) {
+    out.push({
+      id: s.id, type: "aws", position: { x: sx, y: 0 },
+      style: { width: A_NODE_W, height: A_NODE_H }, width: A_NODE_W, height: A_NODE_H,
+      data: {
+        name: s.cidr, label: `RANGE · ${s.count} resources`, resourceLabel: "CIDR",
+        accentColor: "#fbbf24",
+        title: `${s.cidr}\n${s.count} resources hold an address in this range`,
+      },
+    });
+    sx += A_NODE_W + A_GAP;
+  }
   laneY += A_NODE_H + 24;
 
   for (const acct of [...lanes.keys()].sort()) {
@@ -1013,19 +1266,25 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
   const allEdges = useMemo(() => [...dagreEdges, ...findEdges], [dagreEdges, findEdges]);
   const layoutedNodes = useMemo(() => layoutGraph(allNodes, allEdges), [allNodes, allEdges]);
 
+  // Derived before layout, because the wide address ranges it finds become
+  // origin nodes the layout has to place.
+  const derivation = useMemo(
+    () => (view === "arch" ? deriveArchEdges(graph) : { edges: [], sources: [] }),
+    [view, graph],
+  );
   const archNodes = useMemo(
     () =>
       view === "component"
         ? layoutArchitecture(graph, { overlayByKey, region })
         : view === "arch"
-        ? layoutTiered(graph, { overlayByKey, region })
+        ? layoutTiered(graph, { overlayByKey, region, sources: derivation.sources })
         : [],
-    [view, graph, overlayByKey, region],
+    [view, graph, overlayByKey, region, derivation],
   );
   const archEdges = useMemo(() => {
     if (view !== "component" && view !== "arch") return [];
     const drawn = new Set(archNodes.map((n) => n.id));
-    const derived = view === "arch" ? deriveArchEdges(graph) : [];
+    const derived = derivation.edges;
     // An edge pointing at a container the source already sits inside (an
     // internet gateway ATTACHED_TO its VPC) loops from inside the box back to
     // its own border. Nesting already states it.
@@ -1037,31 +1296,35 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings }) 
       .filter((e) => !containers.has(e.to) && !containers.has(e.from))
       // The architecture view is about the request/trust path, so it draws only
       // edges that represent one; the component view keeps the rest.
-      .filter((e) => view !== "arch" || ["TRUSTS", "REACHES", "USES", "FORWARDS"].includes(e.type))
-      .map((e) => ({
-        id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
-        // React Flow's `type` is the renderer; keep the claim it represents so
-        // the SVG and HTML exports can colour and filter by it.
-        kind: e.type,
-        animated: e.type === "REFERENCES",
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 13, height: 13 },
+      .filter((e) => view !== "arch" || ARCH_CLAIMS.includes(e.type))
+      .map((e) => {
         // Solid for a real dependency, faint dashes for mere reachability: the
         // two make different claims and should not look alike.
-        style: e.type === "USES"
-          ? { stroke: "#34d399", strokeWidth: 1.8 }
-          : e.type === "FORWARDS"
-          ? { stroke: "#38bdf8", strokeWidth: 1.8 }
-          : e.type === "REACHES"
-          ? { stroke: "#475569", strokeDasharray: "3 4", strokeWidth: 1, opacity: 0.55 }
-          : e.type === "TRUSTS"
-          ? { stroke: "#a78bfa", strokeDasharray: "5 4", strokeWidth: 1.4 }
-          : { stroke: "#475569", strokeWidth: 1.2 },
-        label: e.type === "REACHES" && e.ports ? `:${e.ports}` : (e.count > 1 ? `×${e.count}` : undefined),
-        labelStyle: { fontSize: 9, fill: "#94a3b8" },
-        labelBgStyle: { fill: "#070b14", fillOpacity: 0.85 },
-        zIndex: e.type === "REACHES" ? 3 : 6,
-      }));
-  }, [view, graph, archNodes]);
+        const c = CLAIM_STYLE[e.type] ?? { stroke: "#475569", width: 1.2, dash: "", z: 6 };
+        // Severity overrides the claim colour. A line that represents a way in
+        // should read as one before it reads as a category.
+        const risky = Boolean(RISK_STROKE[e.risk]);
+        const stroke = risky ? RISK_STROKE[e.risk] : c.stroke;
+        return {
+          id: `${e.from}→${e.to}→${e.type}`, source: e.from, target: e.to, type: "default",
+          // React Flow's `type` is the renderer; keep the claim it represents,
+          // and how bad it is, so the SVG and HTML exports can match.
+          kind: e.type, risk: e.risk ?? null,
+          animated: e.type === "REFERENCES" || e.type === "TUNNELS",
+          markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 13, height: 13 },
+          style: {
+            stroke,
+            strokeWidth: risky ? c.width + 0.4 : c.width,
+            ...(c.dash ? { strokeDasharray: c.dash } : {}),
+            ...(c.opacity && !risky ? { opacity: c.opacity } : {}),
+          },
+          label: e.ports ? `:${e.ports}` : (e.count > 1 ? `×${e.count}` : undefined),
+          labelStyle: { fontSize: 9, fill: risky ? stroke : "#94a3b8" },
+          labelBgStyle: { fill: "#070b14", fillOpacity: 0.85 },
+          zIndex: risky ? 9 : c.z,
+        };
+      });
+  }, [view, graph, archNodes, derivation]);
 
   const isArch = view === "component" || view === "arch";
   const [selected, setSelected] = useState(null);
@@ -1181,10 +1444,19 @@ function architectureSvg(nodes, edges, meta) {
     return { n, x: a.x, y: a.y, w, h };
   });
 
+  // The legend is a block below the diagram rather than an overlay on it: the
+  // canvas is sized exactly to its content, so anything floating would cover a
+  // resource. A static .svg cannot expand one on click, and colours nobody can
+  // decode are worse than no colours.
+  const claims = meta.legend === false ? [] : [...new Set((edges ?? []).map((e) => e.kind).filter((k) => CLAIM_STYLE[k]))];
+  const risks = meta.legend === false ? [] : [...new Set((edges ?? []).map((e) => e.risk).filter((r) => RISK_STROKE[r]))];
+  const legendRows = claims.length + risks.length;
+  const legendH = legendRows ? 30 + legendRows * 17 : 0;
+
   const PAD = 32;
   const maxX = Math.max(...sized.map((s) => s.x + s.w), 0);
   const maxY = Math.max(...sized.map((s) => s.y + s.h), 0);
-  const W = maxX + PAD * 2, H = maxY + PAD * 2 + 34;
+  const W = maxX + PAD * 2, H = maxY + PAD * 2 + 34 + legendH;
 
   const parts = [];
   parts.push(`<rect width="${W}" height="${H}" fill="#070b14"/>`);
@@ -1240,23 +1512,46 @@ function architectureSvg(nodes, edges, meta) {
     );
   }
 
-  // Edges carry their endpoints and claim type so the HTML export can highlight
-  // them; in a plain .svg the attributes are inert. Colours mirror the app:
-  // solid for a real dependency, faint dashes for mere reachability.
-  const EDGE_STYLE = {
-    USES: 'stroke="#34d399" stroke-width="1.6"',
-    FORWARDS: 'stroke="#38bdf8" stroke-width="1.6"',
-    TRUSTS: 'stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="5 4"',
-    REACHES: 'stroke="#475569" stroke-width="1" stroke-dasharray="3 4" opacity="0.5"',
+  // Edges carry their endpoints, claim type and risk so the HTML export can
+  // highlight them; in a plain .svg the attributes are inert. Styling comes
+  // from the same table the canvas uses.
+  const edgeAttrs = (e) => {
+    const c = CLAIM_STYLE[e.kind] ?? { stroke: "#475569", width: 1.2, dash: "" };
+    const risky = Boolean(RISK_STROKE[e.risk]);
+    const stroke = risky ? RISK_STROKE[e.risk] : c.stroke;
+    return `stroke="${stroke}" stroke-width="${risky ? c.width + 0.4 : c.width}"` +
+      (c.dash ? ` stroke-dasharray="${c.dash}"` : "") +
+      (c.opacity && !risky ? ` opacity="${c.opacity}"` : "");
   };
   for (const e of edges ?? []) {
     const a = sized.find((s) => s.n.id === e.source), b = sized.find((s) => s.n.id === e.target);
     if (!a || !b) continue;
-    const style = EDGE_STYLE[e.kind] ?? 'stroke="#475569" stroke-width="1.2"';
     parts.push(
       `<line class="awsome-edge" data-from="${esc(e.source)}" data-to="${esc(e.target)}" ` +
-        `x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" ${style}/>`,
+        `x1="${a.x + a.w + PAD}" y1="${a.y + a.h / 2 + PAD}" x2="${b.x + PAD}" y2="${b.y + b.h / 2 + PAD}" ${edgeAttrs(e)}/>`,
     );
+  }
+
+  if (legendRows) {
+    const ly = maxY + PAD + 26;
+    parts.push(
+      `<text x="${PAD}" y="${ly}" fill="#94a3b8" font-family="ui-monospace,monospace" font-size="10.5" font-weight="700">WHAT THE LINES MEAN</text>`,
+    );
+    const row = (i, stroke, dash, name, desc) => {
+      const y = ly + 18 + i * 17;
+      parts.push(
+        `<line x1="${PAD}" y1="${y - 4}" x2="${PAD + 30}" y2="${y - 4}" stroke="${stroke}" stroke-width="1.8"${dash ? ` stroke-dasharray="${dash}"` : ""}/>`,
+      );
+      parts.push(
+        `<text x="${PAD + 40}" y="${y}" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="10">${esc(name)}</text>`,
+      );
+      parts.push(
+        `<text x="${PAD + 140}" y="${y}" fill="#64748b" font-family="ui-monospace,monospace" font-size="10">${esc(desc)}</text>`,
+      );
+    };
+    claims.forEach((k, i) => row(i, CLAIM_STYLE[k].stroke, CLAIM_STYLE[k].dash, k.toLowerCase(), CLAIM_STYLE[k].desc));
+    risks.forEach((r, i) =>
+      row(claims.length + i, RISK_STROKE[r], "", `${r} risk`, `any line in this colour — ${RISK_DESC[r]}`));
   }
 
   parts.push(
@@ -1272,13 +1567,16 @@ function architectureSvg(nodes, edges, meta) {
  * as JSON, so it opens offline and survives being emailed around.
  */
 function architectureHtml(nodes, edges, findings, meta) {
-  const svg = architectureSvg(nodes, edges, meta)
+  // This export gets the expandable legend instead of the baked-in one.
+  const svg = architectureSvg(nodes, edges, { ...meta, legend: false })
     .replace(/^<\?xml[^>]*\?>\s*/, ""); // inline SVG must not carry an XML prolog
 
   // Only the resources drawn on the diagram, with the fields the panel shows.
+  // Origins — the internet, an address range — are drawn and can be focused on,
+  // but they back no resource, so they get no panel rather than an empty one.
   const detail = {};
   for (const n of nodes) {
-    if (n.type === "group") continue;
+    if (n.type === "group" || String(n.id).startsWith("__")) continue;
     const src = meta.nodeById?.(n.id);
     detail[n.id] = {
       name: n.data?.name ?? "",
@@ -1295,12 +1593,24 @@ function architectureHtml(nodes, edges, findings, meta) {
   // the tag.
   const links = (edges ?? [])
     .filter((e) => e.source && e.target)
-    .map((e) => ({ f: e.source, t: e.target, k: e.kind ?? "" }));
+    .map((e) => ({ f: e.source, t: e.target, k: e.kind ?? "", r: e.risk ?? "" }));
   const payload = JSON.stringify({ detail, findings: active, links }).replace(/</g, "\\u003c");
 
   const sevRow = ["critical", "high", "medium", "low"]
     .filter((k) => counts[k])
     .map((k) => `<span class="pill ${k}">${counts[k]} ${k}</span>`)
+    .join("");
+
+  // Built from the same table the canvas styles edges with, and listing only
+  // the claims this diagram actually contains — a legend for lines that are not
+  // on the page teaches the reader nothing.
+  const swatch = (stroke, dash, w) =>
+    `<svg width="30" height="8" aria-hidden="true"><line x1="0" y1="4" x2="30" y2="4" stroke="${stroke}" stroke-width="${w}"${dash ? ` stroke-dasharray="${dash}"` : ""}/></svg>`;
+  const claimRows = [...new Set((edges ?? []).map((e) => e.kind))].filter((k) => CLAIM_STYLE[k])
+    .map((k) => `<div class="lg">${swatch(CLAIM_STYLE[k].stroke, CLAIM_STYLE[k].dash, 1.8)}<b>${esc(k.toLowerCase())}</b><span>${esc(CLAIM_STYLE[k].desc)}</span></div>`)
+    .join("");
+  const riskRows = [...new Set((edges ?? []).map((e) => e.risk))].filter((r) => RISK_STROKE[r])
+    .map((r) => `<div class="lg">${swatch(RISK_STROKE[r], "", 2.4)}<b>${esc(r)}</b><span>${esc(RISK_DESC[r])}</span></div>`)
     .join("");
 
   return `<!DOCTYPE html>
@@ -1343,6 +1653,16 @@ td.k{color:#64748b;width:44%;padding-right:8px}
 .f .rem{font-size:11.5px;color:#94a3b8;margin-top:4px}
 .f .res{font-size:11px;color:#64748b;margin-top:4px;word-break:break-all}
 .close{float:right;color:#64748b;cursor:pointer;border:0;background:none;font:inherit}
+#legend{position:fixed;right:14px;bottom:14px;z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+#lg-toggle{width:26px;height:26px;border-radius:999px;border:1px solid #2a3550;background:#0d1320f2;color:#94a3b8;cursor:pointer;font:italic 600 13px/1 ui-monospace,monospace}
+#lg-toggle:hover,#legend:not(.collapsed) #lg-toggle{color:#f1f5f9;border-color:#475569}
+#lg-body{width:395px;max-height:44vh;overflow:auto;background:#0a0f1cf2;border:1px solid #2a3550;border-radius:10px;padding:10px 12px;backdrop-filter:blur(4px)}
+#legend.collapsed #lg-body{display:none}
+.lg-h{color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin:6px 0 4px}
+.lg-h:first-child{margin-top:0}
+.lg{display:grid;grid-template-columns:34px 76px 1fr;align-items:baseline;gap:6px;font-size:11px;padding:2px 0}
+.lg b{color:#e2e8f0;font-weight:600}
+.lg span{color:#64748b;line-height:1.35}
 </style></head><body>
 <header>
   <div><h1>${esc(meta.title)}</h1><div class="sub">${esc(meta.footer)}</div></div>
@@ -1363,6 +1683,14 @@ td.k{color:#64748b;width:44%;padding-right:8px}
     <div class="lbl" style="margin-top:10px">arn</div>
     <div class="res" id="p-arn"></div>
   </aside>
+  ${claimRows ? `<div id="legend" class="collapsed">
+    <div id="lg-body">
+      <div class="lg-h">what the lines mean</div>
+      ${claimRows}
+      ${riskRows ? `<div class="lg-h">colour by risk</div>${riskRows}` : ""}
+    </div>
+    <button id="lg-toggle" title="What the lines mean" aria-expanded="false">i</button>
+  </div>` : ""}
 </main>
 <script id="data" type="application/json">${payload}</script>
 <script>
@@ -1440,6 +1768,18 @@ td.k{color:#64748b;width:44%;padding-right:8px}
   // clicking empty canvas closes and restores, matching the app
   document.getElementById("diagram").addEventListener("click", reset);
   document.getElementById("x").addEventListener("click", reset);
+
+  var legend = document.getElementById("legend");
+  if (legend) {
+    var lgToggle = document.getElementById("lg-toggle");
+    lgToggle.addEventListener("click", function(e){
+      e.stopPropagation();
+      var open = legend.classList.toggle("collapsed") === false;
+      lgToggle.setAttribute("aria-expanded", String(open));
+    });
+    // the legend is not canvas; clicking inside it must not reset the focus
+    legend.addEventListener("click", function(e){ e.stopPropagation(); });
+  }
 
   var order = {critical:0, high:1, medium:2, low:3, info:4};
   var list = D.findings.slice().sort(function(a,b){
@@ -1533,6 +1873,69 @@ function DetailPanel({ node, findings, onClose }) {
   );
 }
 
+/* ---------- edge legend ----------
+ * Bottom right, above the minimap, collapsed by default: a diagram whose legend
+ * has to stay open is one whose lines do not read on their own. It lists only
+ * the claims this diagram actually contains, so it shrinks as the view narrows.
+ */
+function Legend({ view, edges }) {
+  const [open, setOpen] = useState(false);
+
+  const groups = useMemo(() => {
+    const rows = view === "arch"
+      ? [
+          ...[...new Set(edges.map((e) => e.kind))].filter((k) => CLAIM_STYLE[k]).map((k) => ({
+            group: "what the lines mean", name: k.toLowerCase(), width: 1.8,
+            stroke: CLAIM_STYLE[k].stroke, dash: CLAIM_STYLE[k].dash, desc: CLAIM_STYLE[k].desc,
+          })),
+          ...[...new Set(edges.map((e) => e.risk))].filter((r) => RISK_STROKE[r]).map((r) => ({
+            group: "colour by risk", name: r, width: 2.4,
+            stroke: RISK_STROKE[r], dash: "", desc: RISK_DESC[r],
+          })),
+        ]
+      : [
+          { group: "what the lines mean", name: "references", stroke: "#f97316", dash: "5 5", width: 1.8,
+            desc: "a security group names another as a source" },
+          { group: "what the lines mean", name: "other", stroke: "#475569", dash: "", width: 1.8,
+            desc: "collected relationships — attachment, membership, routing" },
+        ];
+    const out = [];
+    for (const r of rows) {
+      const g = out.find((x) => x.title === r.group);
+      if (g) g.rows.push(r);
+      else out.push({ title: r.group, rows: [r] });
+    }
+    return out;
+  }, [view, edges]);
+
+  if (!groups.length) return null;
+
+  return h("div", { className: "absolute bottom-[178px] right-4 z-20 flex flex-col items-end gap-1.5" },
+    open
+      ? h("div", {
+          className: "max-h-[44vh] w-[26rem] overflow-auto rounded-xl border border-white/10 bg-[#0a0f1c]/95 p-3 backdrop-blur",
+        },
+          groups.map((g, gi) =>
+            h("div", { key: g.title },
+              h("div", { className: cx("text-[10px] uppercase tracking-[0.08em] text-slate-500", gi ? "mt-2.5" : "") }, g.title),
+              g.rows.map((r) =>
+                h("div", { key: r.name, className: "mt-1 grid grid-cols-[34px_76px_1fr] items-baseline gap-1.5 text-[11px]" },
+                  h("svg", { width: 30, height: 8, className: "self-center" },
+                    h("line", { x1: 0, y1: 4, x2: 30, y2: 4, stroke: r.stroke, strokeWidth: r.width, strokeDasharray: r.dash || undefined })),
+                  h("b", { className: "font-semibold text-slate-200" }, r.name),
+                  h("span", { className: "leading-snug text-slate-500" }, r.desc))),
+            )),
+        )
+      : null,
+    h("button", {
+      className: "flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-[#0d1320]/95 text-slate-400 hover:border-slate-600 hover:text-slate-100",
+      onClick: () => setOpen((v) => !v),
+      title: "What the lines mean",
+      "aria-expanded": open,
+    }, h(Icon, { name: "info", className: "h-4 w-4" })),
+  );
+}
+
 function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, onPaneClick, detail, canExport, exportTitle, exportFooter, findings, nodeById }) {
   const { fitView } = useReactFlow();
   useEffect(() => {
@@ -1604,6 +2007,7 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, 
           title: "Download a self-contained HTML report: diagram, click-to-inspect, and findings",
         }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), "HTML")
       : null,
+    canExport ? h(Legend, { view: viewKey, edges }) : null,
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
       edgesUpdatable: false, nodeTypes: NODE_TYPES, defaultEdgeOptions: { type: "default" },
