@@ -99,7 +99,7 @@ check(await page.locator('text=what the lines mean').count() === 0, 'clicking th
 
 // ---- HTML export ------------------------------------------------------------
 const dl = page.waitForEvent('download');
-await page.getByRole('button', { name: 'HTML' }).click();
+await page.getByRole('button', { name: '.html', exact: true }).click();
 // Saved to a stable path: a download's own temp file is not guaranteed to
 // outlive the handle, and the report has to be loaded back to be checked.
 const file = join(tmpdir(), 'awsome-verify-report.html');
