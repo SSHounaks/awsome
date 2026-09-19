@@ -6,7 +6,7 @@
 //   node scripts/verify-arch-edges.mjs
 
 import { chromium } from 'playwright-core';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -148,6 +148,67 @@ console.log('  drift tab:', JSON.stringify(drift));
 check(drift && drift.open && drift.lines > 0, 'a drift resource expands to its line diff');
 check(drift && drift.stats === 8, 'the drift tab carries the full count row');
 await report.close();
+
+// ---- export all: one file, every view ---------------------------------------
+const dlAll = page.waitForEvent('download');
+await page.getByRole('button', { name: 'export all', exact: true }).click();
+const allFile = join(tmpdir(), 'awsome-verify-all.html');
+await (await dlAll).saveAs(allFile);
+const allHtml = readFileSync(allFile, 'utf8');
+console.log('\nexport all');
+console.log(`  ${(statSync(allFile).size / 1048576).toFixed(2)} MB`);
+
+const all = await browser.newPage({ viewport: { width: 1500, height: 950 } });
+const allExternal = [];
+all.on('request', (r) => { if (!r.url().startsWith('file:')) allExternal.push(r.url()); });
+const allErrors = [];
+all.on('pageerror', (e) => allErrors.push(e.message.split('\n')[0]));
+await all.goto(`file://${allFile}`);
+await all.waitForTimeout(900);
+check(allExternal.length === 0, `the full report loads offline (${allExternal.length} external requests)`);
+
+const tabs = await all.evaluate(() => [...document.querySelectorAll('.vt')].map((b) => b.textContent));
+console.log('  view tabs:', JSON.stringify(tabs));
+check(tabs.length >= 6, 'the full report carries every laid-out view');
+check(!tabs.includes('flow'), 'the flow view stays out — it is a dependency dump, not a document');
+
+for (const v of tabs) {
+  await all.locator(`.vt:text-is("${v}")`).click();
+  await all.waitForTimeout(220);
+  const st = await all.evaluate(() => {
+    const shown = [...document.querySelectorAll('.pane')].filter((e) => getComputedStyle(e).display !== 'none');
+    const pane = shown[0];
+    const over = [...pane.querySelectorAll('svg svg')].filter((g) => g.getBoundingClientRect().width > 60).length;
+    return { shown: shown.length, view: pane?.getAttribute('data-view'),
+             nodes: pane.querySelectorAll('.awsome-node').length, oversizeGlyphs: over };
+  });
+  check(st.shown === 1, `selecting ${v} shows exactly one diagram`);
+  check(st.nodes > 0, `the ${v} pane carries its nodes`);
+  // A lifted <svg> with no width fills the page; this is how that gets caught.
+  check(st.oversizeGlyphs === 0, `${v} glyphs are sized, not page-filling`);
+}
+
+// Dimming has to fade the whole node. With only the rectangle inside the group
+// it faded a border and left the icon and text at full strength.
+await all.locator('.vt:text-is("network")').click();
+await all.waitForTimeout(300);
+const dimmed = await all.evaluate(() => {
+  const pane = [...document.querySelectorAll('.pane')].find((e) => getComputedStyle(e).display !== 'none');
+  const d = pane.querySelector('.awsome-node.dim');
+  return d ? { opacity: getComputedStyle(d).opacity, texts: d.querySelectorAll('text').length, glyphs: d.querySelectorAll('svg').length } : null;
+});
+console.log('  a dimmed node:', JSON.stringify(dimmed));
+check(dimmed && Number(dimmed.opacity) < 0.3, 'a dimmed node is actually faded');
+check(dimmed && dimmed.texts > 0, 'the dimmed node contains its own text, so the fade covers it');
+
+const picked = await all.evaluate(() => {
+  const pane = [...document.querySelectorAll('.pane')].find((e) => getComputedStyle(e).display !== 'none');
+  pane.querySelector('.awsome-node').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  return document.getElementById('panel').classList.contains('open');
+});
+check(picked, 'clicking a resource in the full report opens its panel');
+check(allErrors.length === 0, `the full report runs clean (${allErrors.slice(0, 2).join(' / ') || 'no errors'})`);
+await all.close();
 
 // ---- every view renders, and exports to text that actually parses ----------
 console.log('\nall views');

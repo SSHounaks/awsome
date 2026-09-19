@@ -75,6 +75,13 @@ function iconFor(label, properties) {
   return AWS_ICON[label] ?? null;
 }
 
+// The export lifts rendered glyphs out of the DOM, so it needs a key for the
+// glyph rather than for the node. Only the subnet icon varies by property.
+function iconKey(label, properties) {
+  if (!label) return "";
+  return label === "SUBNET" ? (properties?.map_public_ip ? "SUBNET:public" : "SUBNET:private") : String(label);
+}
+
 const h = React.createElement;
 
 const cx = (...xs) => xs.filter(Boolean).join(" ");
@@ -414,7 +421,7 @@ function layoutArchitecture(graph, opts) {
         // whole ARN. Fall back through both separators.
         name: n.name || n.id.split("/").pop().split(":").pop(), label: n.label,
         marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
-        resourceLabel: n.label, icon: iconFor(n.label, n.properties),
+        resourceLabel: n.label, icon: iconFor(n.label, n.properties), iconKey: iconKey(n.label, n.properties),
         accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
         emphasised: Boolean(ov),
         title: `${n.name || ""}\n${n.label}\n${n.id}`,
@@ -584,7 +591,7 @@ function layoutArchitecture(graph, opts) {
           subtitle: `${b.items.length}`,
           fill: "rgba(148,163,184,0.04)", stroke: COLORS[b.label] ?? "#64748b",
           borderStyle: "solid", borderWidth: 1,
-          icon: iconFor(b.label, null),
+          icon: iconFor(b.label, null), iconKey: iconKey(b.label, null),
         },
       });
       b.items.forEach((m, i) => {
@@ -1235,7 +1242,7 @@ function layoutTiered(graph, opts) {
           data: {
             name: n.name || n.id.split("/").pop().split(":").pop(),
             label: n.label, marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
-            resourceLabel: n.label, icon: iconFor(n.label, n.properties),
+            resourceLabel: n.label, icon: iconFor(n.label, n.properties), iconKey: iconKey(n.label, n.properties),
             accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
             emphasised: Boolean(ov),
             title: `${n.name || ""}\n${n.label}\n${n.id}`,
@@ -1306,7 +1313,7 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
           label: n.label,
           marker,
           resourceLabel: n.label,
-          icon: iconFor(n.label, n.properties),
+          icon: iconFor(n.label, n.properties), iconKey: iconKey(n.label, n.properties),
           // drift overlay keeps its green/amber emphasis
           accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
           emphasised: Boolean(ov),
@@ -1450,6 +1457,43 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
     ? { ...nodeById.get(selected), icon: iconFor(nodeById.get(selected).label, nodeById.get(selected).properties) }
     : null;
 
+  // Every glyph the graph can show, so the palette covers views not on screen.
+  const iconKeys = useMemo(
+    () => [...new Set(graph.nodes.map((n) => iconKey(n.label, n.properties)).filter(Boolean))].sort(),
+    [graph],
+  );
+
+  // Laid out on demand rather than kept in state: "export all" is a rare click,
+  // and holding seven layouts alive to serve it would cost on every render.
+  const buildAllViews = () => {
+    const opts = { overlayByKey, region, findings };
+    const arch = deriveArchEdges(graph);
+    const styled = (es, ns) => {
+      const drawn = new Set(ns.map((n) => n.id));
+      return es.filter((e) => drawn.has(e.from) && drawn.has(e.to)).map(styleClaim);
+    };
+    const out = [];
+    for (const v of DIAGRAM_VIEWS) {
+      if (v === "flow") continue; // a dependency dump, not a document
+      let ns = [], es = [];
+      if (v === "component") {
+        ns = layoutArchitecture(graph, opts);
+      } else if (v === "arch") {
+        ns = layoutTiered(graph, { ...opts, sources: arch.sources });
+        es = styled(arch.edges, ns);
+      } else {
+        const built = v === "dataflow" ? buildDataFlow(graph, { ...opts, derived: arch.edges })
+          : v === "attack" ? buildAttackPaths(graph, { ...opts, derived: arch.edges })
+          : v === "network" ? buildNetwork(graph, opts)
+          : buildAccounts(graph, opts);
+        ns = built.nodes;
+        es = styled(built.edges, ns);
+      }
+      if (ns.length) out.push({ id: v, label: VIEW_LABEL[v], hint: VIEW_HINT[v], nodes: ns, edges: es });
+    }
+    return out;
+  };
+
   const onNodeClick = (_e, n) => {
     // Containers carry no resource of their own; clicking one should not open a
     // panel describing a boundary.
@@ -1470,7 +1514,10 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
       ensureDrift,
       exportRef,
       nodeById: (id) => nodeById.get(id),
+      iconKeys,
+      buildAllViews,
       exportTitle: `AWS ${VIEW_LABEL[view] ?? view} diagram${region ? ` — ${region}` : ""}`,
+      exportAllTitle: `AWS infrastructure report${region ? ` — ${region}` : ""}`,
       exportFooter: `${graph.nodes.length} resources · generated by AWSome`,
     }),
   );
@@ -1674,7 +1721,7 @@ function buildAttackPaths(graph, opts) {
           name: src?.name || (id === INTERNET_ID ? "Internet" : String(id).split("/").pop()),
           label: ruleOn.get(id) ?? (src?.label ?? "PUBLIC"),
           resourceLabel: src?.label ?? "PUBLIC",
-          icon: src ? iconFor(src.label, src.properties) : undefined,
+          icon: src ? iconFor(src.label, src.properties) : undefined, iconKey: iconKey(src?.label, src?.properties),
           accentColor: worst.get(id) >= 3 ? "#f87171" : worst.get(id) ? "#fbbf24" : (COLORS[src?.label] ?? "#475569"),
           emphasised: Boolean(worst.get(id)) || Boolean(ov),
           title: `${src?.name ?? "Internet"}\n${src?.label ?? ""}\n${id}`,
@@ -1784,7 +1831,7 @@ function buildNetwork(graph, opts) {
             data: {
               name: s.properties?.cidr_block || s.name,
               label: `${pub ? "PUBLIC" : "private"} · ${n} resource${n === 1 ? "" : "s"}`,
-              resourceLabel: "SUBNET", icon: iconFor("SUBNET", s.properties),
+              resourceLabel: "SUBNET", icon: iconFor("SUBNET", s.properties), iconKey: iconKey("SUBNET", s.properties),
               accentColor: pub ? "#fbbf24" : "#38bdf8",
               emphasised: pub,
               title: `${s.properties?.cidr_block ?? ""}\n${pub ? "public — a route table on this subnet reaches an internet gateway" : "private"}\n${s.id}`,
@@ -1798,7 +1845,7 @@ function buildNetwork(graph, opts) {
       nodes.push({
         id: igw, type: "aws", position: { x: vpcW + 40, y: vy + VHEAD },
         style: { width: W, height: H }, width: W, height: H,
-        data: { name: byId.get(igw)?.name || "internet gateway", label: "IGW", resourceLabel: "IGW", icon: iconFor("IGW", {}), accentColor: "#fbbf24", title: igw },
+        data: { name: byId.get(igw)?.name || "internet gateway", label: "IGW", resourceLabel: "IGW", icon: iconFor("IGW", {}), iconKey: iconKey("IGW", {}), accentColor: "#fbbf24", title: igw },
       });
     }
     vy += vpcH + 30;
@@ -1877,7 +1924,7 @@ function buildAccounts(graph, opts) {
         style: { width: W, height: H }, width: W, height: H,
         data: {
           name: r.name || String(r.id).split("/").pop(), label: "IAMROLE", resourceLabel: "IAMROLE",
-          icon: iconFor("IAMROLE", r.properties), accentColor: COLORS.IAMROLE ?? "#a78bfa",
+          icon: iconFor("IAMROLE", r.properties), iconKey: iconKey("IAMROLE", r.properties), accentColor: COLORS.IAMROLE ?? "#a78bfa",
           title: `${r.name}\n${r.id}`,
         },
       });
@@ -1924,6 +1971,16 @@ function fitText(s, px, size) {
   const max = Math.max(1, Math.floor(px / (size * 0.6)));
   const str = String(s ?? "");
   return str.length <= max ? str : str.slice(0, Math.max(1, max - 1)) + "…";
+}
+
+// A lifted <svg> without width and height scales to fill whatever contains it,
+// which in an export is the whole page. Never trust the source to have set them.
+function sizedGlyph(svg) {
+  if (!svg) return null;
+  return String(svg).replace(/^<svg\b([^>]*)>/i, (m, attrs) => {
+    const cleaned = attrs.replace(/\s(width|height)="[^"]*"/gi, "");
+    return `<svg${cleaned} width="30" height="30">`;
+  });
 }
 
 function architectureSvg(nodes, edges, meta) {
@@ -1989,25 +2046,23 @@ function architectureSvg(nodes, edges, meta) {
     }
 
     const accent = d.accentColor ?? "#475569";
-    // data-node-id lets the HTML export bind a click handler to the shape; it is
-    // inert in a plain .svg file.
-    parts.push(
-      `<g data-node-id="${esc(s.n.id)}" class="awsome-node"><rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="8" fill="#0d1320" stroke="${accent}" stroke-width="${d.emphasised ? 2 : 1}"/></g>`,
-    );
-    const icon = meta.iconFor?.(s.n.id);
-    if (icon) parts.push(`<g transform="translate(${x + 12},${y + 12})">${icon}</g>`);
-    else {
-      parts.push(`<rect x="${x + 12}" y="${y + 12}" width="30" height="30" rx="5" fill="${accent}"/>`);
-      parts.push(
-        `<text x="${x + 27}" y="${y + 32}" text-anchor="middle" fill="#0b1220" font-family="ui-monospace,monospace" font-size="12" font-weight="700">${esc((d.label ?? "?").slice(0, 2))}</text>`,
-      );
-    }
+    // The whole node goes inside the group: data-node-id lets the HTML export
+    // bind a click handler to it, and dimming it has to fade the icon and the
+    // text too. With only the rectangle inside, focus faded a border and left
+    // everything else at full strength.
     const tx = x + 52, tw = s.w - 64;
+    const icon = sizedGlyph(meta.iconFor?.(s.n.id));
+    const glyph = icon
+      ? `<g transform="translate(${x + 12},${y + 12})">${icon}</g>`
+      : `<rect x="${x + 12}" y="${y + 12}" width="30" height="30" rx="5" fill="${accent}"/>` +
+        `<text x="${x + 27}" y="${y + 32}" text-anchor="middle" fill="#0b1220" font-family="ui-monospace,monospace" font-size="12" font-weight="700">${esc((d.label ?? "?").slice(0, 2))}</text>`;
     parts.push(
-      `<text x="${tx}" y="${y + 25}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5">${esc(fitText((d.marker ?? "") + (d.name ?? ""), tw, 11.5))}</text>`,
-    );
-    parts.push(
-      `<text x="${tx}" y="${y + 39}" fill="#64748b" font-family="ui-monospace,monospace" font-size="9.5">${esc(fitText(d.label, tw, 9.5))}</text>`,
+      `<g data-node-id="${esc(s.n.id)}" class="awsome-node">` +
+        `<rect x="${x}" y="${y}" width="${s.w}" height="${s.h}" rx="8" fill="#0d1320" stroke="${accent}" stroke-width="${d.emphasised ? 2 : 1}"/>` +
+        glyph +
+        `<text x="${tx}" y="${y + 25}" fill="#f1f5f9" font-family="ui-monospace,monospace" font-size="11.5">${esc(fitText((d.marker ?? "") + (d.name ?? ""), tw, 11.5))}</text>` +
+        `<text x="${tx}" y="${y + 39}" fill="#64748b" font-family="ui-monospace,monospace" font-size="9.5">${esc(fitText(d.label, tw, 9.5))}</text>` +
+      `</g>`,
     );
   }
 
@@ -2217,8 +2272,12 @@ function driftHtml(d) {
  * emailed around.
  */
 function architectureHtml(nodes, edges, findings, meta) {
-  // This export gets the expandable legend instead of the baked-in one.
-  const svg = architectureSvg(nodes, edges, { ...meta, legend: false })
+  // One view, or all of them. Either way the panes are built the same way, so
+  // the single-diagram report and the full one share every line below.
+  const panes = meta.views?.length
+    ? meta.views
+    : [{ id: "only", label: "diagram", hint: "", nodes, edges, iconFor: meta.iconFor }];
+  const svgOf = (v) => architectureSvg(v.nodes, v.edges, { ...meta, iconFor: v.iconFor ?? meta.iconFor, legend: false })
     .replace(/^<\?xml[^>]*\?>\s*/, ""); // inline SVG must not carry an XML prolog
   const drift = driftHtml(meta.drift);
 
@@ -2226,14 +2285,17 @@ function architectureHtml(nodes, edges, findings, meta) {
   // Origins — the internet, an address range — are drawn and can be focused on,
   // but they back no resource, so they get no panel rather than an empty one.
   const detail = {};
-  for (const n of nodes) {
-    if (n.type === "group" || String(n.id).startsWith("__")) continue;
-    const src = meta.nodeById?.(n.id);
-    detail[n.id] = {
-      name: n.data?.name ?? "",
-      label: n.data?.label ?? "",
-      properties: src?.properties ?? {},
-    };
+  for (const v of panes) {
+    for (const n of v.nodes) {
+      if (n.type === "group" || String(n.id).startsWith("__")) continue;
+      const src = meta.nodeById?.(n.id);
+      if (!src) continue; // lane-local duplicates resolve to the same resource
+      detail[n.id] = {
+        name: n.data?.name ?? "",
+        label: n.data?.label ?? "",
+        properties: src.properties ?? {},
+      };
+    }
   }
   const active = (findings ?? []).filter((f) => !f.suppressed);
   const counts = {};
@@ -2242,9 +2304,11 @@ function architectureHtml(nodes, edges, findings, meta) {
   // Script content is raw text, not entity-decoded, so HTML-escaping would
   // corrupt the JSON. Escaping "<" as \u003c is valid JSON and cannot terminate
   // the tag.
-  const links = (edges ?? [])
-    .filter((e) => e.source && e.target)
-    .map((e) => ({ f: e.source, t: e.target, k: e.kind ?? "", r: e.risk ?? "" }));
+  const links = {};
+  for (const v of panes) {
+    links[v.id] = (v.edges ?? []).filter((e) => e.source && e.target)
+      .map((e) => ({ f: e.source, t: e.target, k: e.kind ?? "", r: e.risk ?? "" }));
+  }
   const payload = JSON.stringify({ detail, findings: active, links }).replace(/</g, "\\u003c");
 
   const sevRow = ["critical", "high", "medium", "low"]
@@ -2257,12 +2321,21 @@ function architectureHtml(nodes, edges, findings, meta) {
   // on the page teaches the reader nothing.
   const swatch = (stroke, dash, w) =>
     `<svg width="30" height="8" aria-hidden="true"><line x1="0" y1="4" x2="30" y2="4" stroke="${stroke}" stroke-width="${w}"${dash ? ` stroke-dasharray="${dash}"` : ""}/></svg>`;
-  const claimRows = [...new Set((edges ?? []).map((e) => e.kind))].filter((k) => CLAIM_STYLE[k])
+  // One legend covering every claim on any pane: switching view should not move
+  // the reader's reference out from under them.
+  const allEdges = panes.flatMap((v) => v.edges ?? []);
+  const claimRows = [...new Set(allEdges.map((e) => e.kind))].filter((k) => CLAIM_STYLE[k])
     .map((k) => `<div class="lg">${swatch(CLAIM_STYLE[k].stroke, CLAIM_STYLE[k].dash, 1.8)}<b>${esc(k.toLowerCase())}</b><span>${esc(CLAIM_STYLE[k].desc)}</span></div>`)
     .join("");
-  const riskRows = [...new Set((edges ?? []).map((e) => e.risk))].filter((r) => RISK_STROKE[r])
+  const riskRows = [...new Set(allEdges.map((e) => e.risk))].filter((r) => RISK_STROKE[r])
     .map((r) => `<div class="lg">${swatch(RISK_STROKE[r], "", 2.4)}<b>${esc(r)}</b><span>${esc(RISK_DESC[r])}</span></div>`)
     .join("");
+  const viewTabs = panes.length > 1
+    ? `<div class="views">${panes.map((v, i) =>
+        `<button class="vt" data-view="${esc(v.id)}" aria-selected="${i === 0}" title="${esc(v.hint ?? "")}">${esc(v.label)}</button>`).join("")}</div>`
+    : "";
+  const viewPanes = panes.map((v, i) =>
+    `<div class="pane" id="pane-${esc(v.id)}" data-view="${esc(v.id)}"${i ? ' style="display:none"' : ""}>${svgOf(v)}</div>`).join("");
 
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/>
@@ -2314,6 +2387,10 @@ td.k{color:#64748b;width:44%;padding-right:8px}
 .lg{display:grid;grid-template-columns:34px 76px 1fr;align-items:baseline;gap:6px;font-size:11px;padding:2px 0}
 .lg b{color:#e2e8f0;font-weight:600}
 .lg span{color:#64748b;line-height:1.35}
+.views{position:sticky;left:0;display:flex;flex-wrap:wrap;gap:6px;padding:0 0 12px}
+button.vt{background:#0d1320;color:#94a3b8;border:1px solid #2a3550;border-radius:8px;padding:4px 11px;cursor:pointer;font:inherit;font-size:11.5px}
+button.vt[aria-selected=true]{background:#1e293b;color:#f1f5f9;border-color:#475569}
+.pane svg{max-width:none}
 #drift{display:none;padding:16px 18px;max-width:1100px}
 .dmeta{display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11.5px;color:#94a3b8;margin-bottom:12px}
 .dmeta .ar{color:#475569}
@@ -2361,7 +2438,7 @@ h3.dh span{font-family:inherit}
   </div>
 </header>
 <main>
-  <div id="diagram">${svg}</div>
+  <div id="diagram">${viewTabs}${viewPanes}</div>
   <div id="findings"></div>
   <div id="drift">${drift || '<div class="dnone">No snapshot comparison was available when this report was exported.</div>'}</div>
   <aside id="panel"><button class="close" id="x">&times;</button>
@@ -2415,45 +2492,71 @@ h3.dh span{font-family:inherit}
   // Resources nothing connects to recede from the start; selecting one leaves
   // only its connections lit. Skipped when there are no edges at all, as in the
   // component view, where dimming by connectivity would fade everything.
-  var nodeEls = [].slice.call(document.querySelectorAll(".awsome-node"));
-  var edgeEls = [].slice.call(document.querySelectorAll(".awsome-edge"));
-  var links = D.links || [];
-  var hasEdges = links.length > 0;
-
-  var touching = {};
-  links.forEach(function(l){ touching[l.f] = true; touching[l.t] = true; });
+  // Each view is its own pane with its own links; focus applies within the pane
+  // on screen, because a resource can appear on several of them.
+  var panes = {};
+  [].slice.call(document.querySelectorAll(".pane")).forEach(function(el){
+    var v = el.getAttribute("data-view");
+    var links = (D.links && D.links[v]) || [];
+    var touching = {};
+    links.forEach(function(l){ touching[l.f] = true; touching[l.t] = true; });
+    panes[v] = {
+      el: el,
+      links: links,
+      touching: touching,
+      nodes: [].slice.call(el.querySelectorAll(".awsome-node")),
+      edges: [].slice.call(el.querySelectorAll(".awsome-edge")),
+    };
+  });
+  var activeView = Object.keys(panes)[0];
 
   function applyFocus(id){
-    if (!hasEdges) return;
+    var p = panes[activeView];
+    if (!p || !p.links.length) return;
     var keep = null;
     if (id) {
       keep = {}; keep[id] = true;
-      links.forEach(function(l){
+      p.links.forEach(function(l){
         if (l.f === id) keep[l.t] = true;
         if (l.t === id) keep[l.f] = true;
       });
     }
-    nodeEls.forEach(function(g){
+    p.nodes.forEach(function(g){
       var nid = g.getAttribute("data-node-id");
-      var lit = keep ? !!keep[nid] : !!touching[nid];
+      var lit = keep ? !!keep[nid] : !!p.touching[nid];
       g.classList.toggle("dim", !lit);
     });
-    edgeEls.forEach(function(ln){
+    p.edges.forEach(function(ln){
       var on = keep ? (keep[ln.getAttribute("data-from")] && keep[ln.getAttribute("data-to")]) : true;
       ln.classList.toggle("dim-edge", !on);
     });
   }
+
+  Object.keys(panes).forEach(function(v){
+    panes[v].nodes.forEach(function(g){
+      g.addEventListener("click", function(e){
+        e.stopPropagation();
+        var id = g.getAttribute("data-node-id");
+        show(id);
+        applyFocus(id);
+      });
+    });
+  });
   applyFocus(null);
 
-  nodeEls.forEach(function(g){
-    g.addEventListener("click", function(e){
-      e.stopPropagation();
-      var id = g.getAttribute("data-node-id");
-      show(id);
-      applyFocus(id);
+  var vts = [].slice.call(document.querySelectorAll(".vt"));
+  vts.forEach(function(btn){
+    btn.addEventListener("click", function(){
+      activeView = btn.getAttribute("data-view");
+      vts.forEach(function(b2){ b2.setAttribute("aria-selected", b2 === btn); });
+      Object.keys(panes).forEach(function(v){ panes[v].el.style.display = v === activeView ? "block" : "none"; });
+      panel.classList.remove("open");
+      applyFocus(null);
     });
   });
   function reset(){ panel.classList.remove("open"); applyFocus(null); }
+  // A resource that is on no pane (an origin, a lane-local duplicate) simply
+  // has no panel; clicking it still refocuses.
   // clicking empty canvas closes and restores, matching the app
   document.getElementById("diagram").addEventListener("click", reset);
   document.getElementById("x").addEventListener("click", reset);
@@ -2632,7 +2735,7 @@ function Legend({ view, edges }) {
   );
 }
 
-function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, onPaneClick, detail, canExport, exportTitle, exportFooter, findings, nodeById, ensureDrift, exportRef }) {
+function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, onPaneClick, detail, canExport, exportTitle, exportAllTitle, exportFooter, findings, nodeById, ensureDrift, exportRef, iconKeys, buildAllViews }) {
   const { fitView } = useReactFlow();
   useEffect(() => {
     if (!nodes.length) return;
@@ -2647,17 +2750,23 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, 
     const id = requestAnimationFrame(attempt);
     return () => { stopped = true; cancelAnimationFrame(id); };
   }, [nodes.length, edges.length, viewKey]);
+  // Glyph lookup for the exports: keyed by the icon, not by the node, so a view
+  // that was never rendered still gets its iconography.
+  const glyphResolver = (list) => {
+    const byKey = new Map();
+    for (const el of document.querySelectorAll("[data-icon-key]")) {
+      const g = el.querySelector("svg");
+      if (g) byKey.set(el.getAttribute("data-icon-key"), g.outerHTML);
+    }
+    const keyOf = new Map(list.map((n) => [n.id, n.data?.iconKey ?? n.data?.resourceLabel ?? ""]));
+    return (id) => byKey.get(keyOf.get(id)) ?? null;
+  };
+
   const exportSvg = () => {
-    // Icon glyphs are inline <svg> in each node; lift them so the export keeps
-    // the AWS iconography rather than falling back to lettered chips.
-    const iconFor = (id) => {
-      const el = document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"] svg`);
-      return el ? el.outerHTML : null;
-    };
     const svg = architectureSvg(nodes, edges, {
       title: exportTitle ?? "AWS architecture",
       footer: exportFooter ?? "",
-      iconFor,
+      iconFor: glyphResolver(nodes),
     });
     download(svg, "image/svg+xml", "svg");
   };
@@ -2669,16 +2778,33 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, 
     let drift = null;
     try { drift = await ensureDrift?.(); } catch { /* a report without drift beats no report */ }
 
-    const iconFor = (id) => {
-      const el = document.querySelector(`.react-flow__node[data-id="${CSS.escape(id)}"] svg`);
-      return el ? el.outerHTML : null;
-    };
     const html = architectureHtml(nodes, edges, findings ?? [], {
       title: exportTitle ?? "AWS architecture",
       footer: exportFooter ?? "",
-      iconFor,
+      iconFor: glyphResolver(nodes),
       nodeById,
       drift,
+    });
+    download(html, "text/html", "html");
+  };
+
+  // "Export all": every laid-out view in one offline file. The builders are
+  // pure functions of the graph, so the views that are not on screen can be
+  // laid out here rather than by switching to each one in turn.
+  const exportAll = async () => {
+    let drift = null;
+    try { drift = await ensureDrift?.(); } catch { /* a report without drift beats no report */ }
+    const views = (buildAllViews?.() ?? []).map((v) => ({
+      ...v, iconFor: glyphResolver(v.nodes),
+    }));
+    if (!views.length) return;
+    const html = architectureHtml(views[0].nodes, views[0].edges, findings ?? [], {
+      title: exportAllTitle ?? "AWS architecture",
+      footer: exportFooter ?? "",
+      iconFor: views[0].iconFor,
+      nodeById,
+      drift,
+      views,
     });
     download(html, "text/html", "html");
   };
@@ -2707,12 +2833,25 @@ function FlowCanvas({ nodes, edges, overlayByKey, COLORS, viewKey, onNodeClick, 
   // glyphs are, so they are published upward rather than lifted.
   useEffect(() => {
     if (!exportRef) return;
-    exportRef.current = canExport ? { svg: exportSvg, html: exportHtml, mmd: exportMermaid } : null;
+    exportRef.current = canExport
+      ? { svg: exportSvg, html: exportHtml, mmd: exportMermaid, all: exportAll }
+      : null;
     return () => { exportRef.current = null; };
   });
 
   return h("div", { className: "relative h-full w-full" },
     detail,
+    // Every glyph the estate can show, rendered once and hidden. The SVG export
+    // lifts glyphs out of the DOM, and "export all" covers views that are not
+    // on screen — without this it could only draw the view you were looking at.
+    h("div", { className: "pointer-events-none absolute -z-10 h-0 w-0 overflow-hidden opacity-0", "aria-hidden": "true" },
+      (iconKeys ?? []).map((k) => {
+        const [label, variant] = k.split(":");
+        const El = iconFor(label, { map_public_ip: variant === "public" });
+        // Sized by attribute, exactly as AwsNode does: the export lifts this
+        // markup verbatim, and an <svg> with no width fills whatever contains it.
+        return El ? h("span", { key: k, "data-icon-key": k }, h(El, { width: 30, height: 30 })) : null;
+      })),
     canExport ? h(Legend, { view: viewKey, edges }) : null,
     h(ReactFlow, {
       nodes, edges, nodesDraggable: false,
@@ -4016,6 +4155,13 @@ function App() {
                       onClick: () => runExport("svg"),
                       title: "Download this diagram as a standalone SVG",
                     }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), exportBusy === "svg" ? "\u2026" : ".svg"),
+                    h("button", {
+                      className: cx("toggle", exportBusy === "all" ? "toggle-on" : "toggle-off"),
+                      disabled: Boolean(exportBusy),
+                      onClick: () => runExport("all"),
+                      title: "Download one offline report with every diagram, the findings and the drift",
+                    }, h(Icon, { name: "download", className: "h-3.5 w-3.5" }), exportBusy === "all" ? "building\u2026" : "export all"),
+                    h("span", { className: "mx-0.5 h-5 w-px bg-white/10" }),
                     h("button", {
                       className: "toggle toggle-off", disabled: Boolean(exportBusy),
                       onClick: () => runExport("mmd"),
