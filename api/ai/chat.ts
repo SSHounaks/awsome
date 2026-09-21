@@ -4,8 +4,9 @@ import { askHeuristic } from "./heuristic.ts";
 import { askBedrock, bedrockModelName } from "./bedrock.ts";
 import { askOpenRouter, openRouterModelName } from "./openai.ts";
 import { askOpencode } from "./opencode.ts";
+import { askAnthropic, anthropicModelName } from "./anthropic.ts";
 
-export type ChatProvider = "heuristic" | "bedrock" | "openrouter" | "opencode";
+export type ChatProvider = "heuristic" | "anthropic" | "bedrock" | "openrouter" | "opencode";
 
 export interface ChatResult {
   provider: ChatProvider;
@@ -36,12 +37,13 @@ Answer style:
 
 const PROVIDER_LABEL: Record<ChatProvider, string> = {
   heuristic: "heuristic",
+  anthropic: "Anthropic",
   bedrock: "Bedrock",
   openrouter: "OpenRouter",
   opencode: "opencode",
 };
 
-const KNOWN = new Set<string>(["heuristic", "bedrock", "openrouter", "opencode"]);
+const KNOWN = new Set<string>(["heuristic", "anthropic", "bedrock", "openrouter", "opencode"]);
 
 async function runProvider(
   p: string,
@@ -50,6 +52,10 @@ async function runProvider(
   timeoutMs: number,
 ): Promise<{ name: ChatProvider; model: string; text: string }> {
   switch (p) {
+    case "anthropic": {
+      const model = anthropicModelName();
+      return { name: "anthropic", model, text: await askAnthropic(system, user, timeoutMs) };
+    }
     case "bedrock": {
       const model = bedrockModelName();
       return { name: "bedrock", model, text: await askBedrock(system, user, timeoutMs) };

@@ -54,8 +54,14 @@ tw:
 	fi
 	$(TW) -i web/styles.src.css -o web/styles.css --minify
 
+# ANTHROPIC_CONFIG_DIR is readable/writable so the `anthropic` chat provider can
+# use an `ant auth login` OAuth profile instead of a static API key. Write access
+# is needed because the SDK saves refreshed tokens back to the profile. Narrow it
+# to that one directory rather than opening up $HOME.
+ANTHROPIC_CONFIG_DIR ?= $(HOME)/.config/anthropic
+
 web: tw
-	@mise x -- bash -lc 'deno run --allow-net --allow-read=. --allow-run=bash,kill,setsid,opencode,pgrep --allow-write=/tmp/awsome --allow-env api/main.ts'
+	@mise x -- bash -lc 'deno run --allow-net --allow-read=.,$(ANTHROPIC_CONFIG_DIR) --allow-run=bash,kill,setsid,opencode,pgrep --allow-write=/tmp/awsome,$(ANTHROPIC_CONFIG_DIR) --allow-env api/main.ts'
 
 check-web: tw
 	@mise x -- bash -lc 'deno check api/main.ts api/mcp_server.ts api/ai/chat.ts && deno check --import-map=web/importmap.json web/app.js'

@@ -1534,6 +1534,7 @@ const SUGGESTIONS = [
 
 const PMETA = {
   heuristic: { label: "Heuristic", badge: "border-slate-400/30 bg-slate-400/10 text-slate-300" },
+  anthropic: { label: "Claude",    badge: "border-orange-300/30 bg-orange-300/10 text-orange-200" },
   bedrock:   { label: "Bedrock",   badge: "border-orange-400/30 bg-orange-400/10 text-orange-300" },
   openrouter:{ label: "OpenRouter", badge: "border-sky-400/30 bg-sky-400/10 text-sky-300" },
   opencode:  { label: "opencode",  badge: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" },
@@ -1651,7 +1652,7 @@ function Ask({ log, busy, onSend, provider, setProvider, lastAsst, oc, ocBusy, o
           }),
           h("select", { className: "select shrink-0", value: provider, onChange: (e) => setProvider(e.target.value), title: "provider" },
             h("option", { value: "auto" }, "auto"),
-            ["heuristic", "bedrock", "openrouter", "opencode"].map((p) => h("option", { key: p, value: p }, p)),
+            ["heuristic", "anthropic", "bedrock", "openrouter", "opencode"].map((p) => h("option", { key: p, value: p }, p)),
           ),
           h("button", { className: "btn-primary shrink-0", disabled: busy || !q.trim(), onClick: send },
             busy ? h(Icon, { name: "refresh", className: "h-3.5 w-3.5 animate-spin" }) : h(Icon, { name: "arrowRight", className: "h-3.5 w-3.5" }),
