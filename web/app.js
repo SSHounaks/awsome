@@ -215,6 +215,7 @@ const COLORS = {
   LB: "#ec4899", TARGETGROUP: "#db2777", ASG: "#8b5cf6", DYNAMODBTABLE: "#2563eb",
   IAMPROFILE: "#a16207", IAMPOLICY: "#ca8a04", AMI: "#64748b", OPENSEARCH: "#0ea5e9",
   ECSCLUSTER: "#059669", EKS: "#0284c7", ECRREPOSITORY: "#4f46e5", FLOWLOG: "#71717a",
+  EVENTBRIDGERULE: "#c026d3",
 };
 const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", low: "#64748b" };
 

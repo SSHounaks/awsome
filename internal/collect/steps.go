@@ -22,6 +22,7 @@ var serviceOrder = []string{
 	"load-balancers", "rds-instances", "rds-subnet-groups", "cache-clusters",
 	"redshift-clusters", "opensearch-domains", "tables", "functions",
 	"ecs-clusters", "eks-clusters", "buckets", "ecr-repos", "flow-logs",
+	"events",
 }
 
 // Plan builds the step list for one account.
@@ -108,6 +109,8 @@ func RunStep(ctx context.Context, cfg Config, step Step, snapshotID string, emit
 		return collectEcrRepositories(ctx, cfg, a, emit)
 	case "flow-logs":
 		return collectFlowLogs(ctx, cfg, a, emit)
+	case "events":
+		return collectEventRules(ctx, cfg, a, emit)
 	case "iam":
 		return collectIam(ctx, cfg, a, emit)
 	case "iam-credentials":
