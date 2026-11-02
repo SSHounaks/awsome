@@ -11,7 +11,9 @@ import (
 type Graph struct {
 	Nodes []model.Node
 	Edges []model.Edge
-	byKey map[string]model.Node
+	// Declarations is what Terraform claims to manage, when state was ingested.
+	Declarations *DeclarationIndex
+	byKey        map[string]model.Node
 }
 
 func LoadRecords(path string) (*Graph, error) {

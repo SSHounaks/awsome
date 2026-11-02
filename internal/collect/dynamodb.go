@@ -11,7 +11,7 @@ import (
 )
 
 func collectTables(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}

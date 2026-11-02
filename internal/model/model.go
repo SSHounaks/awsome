@@ -33,6 +33,7 @@ type Coverage struct {
 	Kind       string `json:"kind"`
 	Service    string `json:"service"`
 	Region     string `json:"region"`
+	AccountID  string `json:"account_id,omitempty"`
 	Status     string `json:"status"`
 	Reason     string `json:"reason,omitempty"`
 	Error      string `json:"error,omitempty"`
@@ -41,9 +42,12 @@ type Coverage struct {
 }
 
 type Snapshot struct {
-	Kind       string         `json:"kind"`
-	SnapshotID string         `json:"snapshot_id"`
-	AccountID  string         `json:"account_id"`
+	Kind       string `json:"kind"`
+	SnapshotID string `json:"snapshot_id"`
+	AccountID  string `json:"account_id"`
+	// Accounts lists every account in the snapshot. AccountID stays populated
+	// with the first for backward compatibility with single-account snapshots.
+	Accounts   []string       `json:"accounts,omitempty"`
 	Partition  string         `json:"partition"`
 	StartedAt  string         `json:"started_at"`
 	FinishedAt string         `json:"finished_at"`

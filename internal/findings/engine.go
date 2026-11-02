@@ -20,6 +20,10 @@ var ruleOrder = []func(*Graph) []Finding{
 	ruleS3PublicBucket,
 	ruleOpenIngress,
 	ruleSgOpenEgress,
+	// outside-in paths that bypass the gateway/route/address/group chain
+	ruleEgressEstablishedTunnel,
+	ruleBastionWithDataTierReach,
+	ruleFlatInternalSecurityGroup,
 	ruleEksPublicEndpoint,
 	rulePublicInstance,
 	// data protection
@@ -33,6 +37,7 @@ var ruleOrder = []func(*Graph) []Finding{
 	ruleFlowLogsDisabled,
 	ruleOrphanSG,
 	ruleMissingTags,
+	ruleUnmanagedResource,
 }
 
 func Run(g *Graph) []Finding {

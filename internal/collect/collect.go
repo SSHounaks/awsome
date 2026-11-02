@@ -13,8 +13,13 @@ import (
 )
 
 func Run(ctx context.Context, cfg config.Config, target Target, snapshotID string, emit *Emitter) error {
-	steps := Plan(target)
-	return runSteps(ctx, cfg, steps, snapshotID, emit)
+	return runSteps(ctx, cfg, Plan(target), snapshotID, emit)
+}
+
+// RunAll scans every target into one snapshot. Steps from different accounts
+// share the worker pool, so a slow account does not serialise the rest.
+func RunAll(ctx context.Context, cfg config.Config, targets []Target, snapshotID string, emit *Emitter) error {
+	return runSteps(ctx, cfg, PlanAll(targets), snapshotID, emit)
 }
 
 func runSteps(ctx context.Context, cfg config.Config, steps []Step, snapshotID string, emit *Emitter) error {
@@ -89,6 +94,7 @@ func coverageFor(step Step, snapshotID string, err error) model.Coverage {
 		Kind:       "coverage",
 		Service:    step.Service,
 		Region:     step.Region,
+		AccountID:  step.AccountID,
 		Status:     "ok",
 		SnapshotID: snapshotID,
 		ScannedAt:  model.Now(),
@@ -109,6 +115,28 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// MakeSnapshotFor builds the snapshot record for a multi-account scan.
+func MakeSnapshotFor(snapshotID string, targets []Target, startedAt, status string) model.Snapshot {
+	var accounts, regions []string
+	seenRegion := map[string]bool{}
+	for _, t := range targets {
+		accounts = append(accounts, t.AccountID)
+		for _, r := range t.Regions {
+			if !seenRegion[r] {
+				seenRegion[r] = true
+				regions = append(regions, r)
+			}
+		}
+	}
+	first := Target{}
+	if len(targets) > 0 {
+		first = targets[0]
+	}
+	s := MakeSnapshot(snapshotID, first.AccountID, first.Partition, regions, startedAt, status)
+	s.Accounts = accounts
+	return s
 }
 
 func MakeSnapshot(snapshotID, accountID, partition string, regions []string, startedAt string, status string) model.Snapshot {

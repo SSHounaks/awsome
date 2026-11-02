@@ -23,3 +23,6 @@ web/styles.css
 
 # accepted-risk baseline names real resources — keep it out of this public repo
 .awsome-baseline.json
+
+# state locations name real buckets/accounts - keep out of this public repo
+.awsome-tfstate.json

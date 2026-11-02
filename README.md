@@ -177,6 +177,31 @@ go run ./cmd/awsome-scanner --regions us-east-1,us-west-2
 
 Rules of thumb: no `--endpoint-url` = real AWS; credential chain = SSO/default profile.
 
+### Scanning several accounts at once
+
+`--profiles` scans one account per profile into a single snapshot, so
+cross-account relationships (a role in one account trusted by another) resolve to
+real nodes on both sides instead of dangling:
+
+```sh
+go run ./cmd/awsome-scanner --regions us-gov-west-1 \
+  --profiles ReadOnlyAccess-111111111111,SecurityAudit-222222222222
+```
+
+- Each account authenticates with its **own** profile; a step never borrows
+  another account's credentials.
+- A profile that cannot be resolved is reported and skipped, not fatal — in a
+  real estate some accounts belong to other teams, and scanning what you can
+  reach beats failing entirely. The scan only errors when *nothing* resolved.
+- Two profiles pointing at the same account are de-duplicated, so
+  `ReadOnlyAccess-X,SecurityAudit-X` scans X once.
+- Global steps (IAM, IAM credentials, CloudTrail) run **once per account**, not
+  once per region; CloudTrail writes `trail-<account-id>.jsonl` per account.
+- `summary.json` gains an `accounts` array. `account_id` stays populated with the
+  first account so single-account tooling keeps working.
+
+`--profile` (singular) is unchanged for single-account scans.
+
 ### Non-commercial partitions (GovCloud, China)
 
 Partition is derived from the STS caller ARN, so `arn:aws-us-gov:...` keys are emitted
@@ -262,7 +287,30 @@ compose.yml              LocalStack service
 
 Compare any two snapshots with `GET /api/diff?from=<snap>&to=<snap>` (defaults to latest vs previous). Returns per-node added/removed/changed (property-level field deltas), edge diffs, and finding-level drift (new/resolved findings, severity or message changes). Exposed in the SPA as the **Diff** tab.
 
-The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. Export the whole report as Markdown or JSON with the buttons in the toolbar or:
+The Diff tab is a Bitbucket-style viewer: resources are grouped **added (green) / removed (red) / changed (amber)**, each as a collapsible block with a line-level diff (red `−` deleted rows, green `+` added rows, dim unchanged context), drill-down per field, plus flattened edges and finding rows. The **Diagram** tab has a *drift overlay* (green = added, amber = changed nodes) with its own from/to pickers. The diagram has three views:
+
+- **component** — VPC / AZ / subnet boundaries with resources nested inside: what
+  runs where. This is a deployment/topology view.
+- **architecture** — resources placed in the tier their role puts them in (edge →
+  compute → data → identity), one lane per account, drawing only request-path and
+  trust edges: what talks to what. Cross-account trust shows as a line between
+  lanes.
+- **flow** — the raw dependency graph, laid out left to right.
+
+In the architecture view, resources nothing connects to are dimmed from the
+start — they are inventory, not part of any path. Clicking a resource dims
+everything that is not on one of its connections and thickens the ones that are;
+clicking empty canvas restores the full picture.
+
+The component and architecture views export two self-contained artefacts from the toolbar:
+
+- **SVG** — the diagram alone, for docs and slides.
+- **HTML** — a single-file report: the diagram with click-to-inspect resource
+  details, plus a findings view. No server, no network, no build step; the
+  diagram is inlined as SVG and the data as JSON, so it opens offline and
+  survives being emailed. Verified by rendering it in an offline browser context.
+
+Export the whole report as Markdown or JSON with the buttons in the toolbar or:
 
 ```sh
 curl -s 'http://127.0.0.1:8000/api/diff/export?format=md'

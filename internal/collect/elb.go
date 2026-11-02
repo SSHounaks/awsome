@@ -12,7 +12,7 @@ import (
 )
 
 func collectLoadBalancers(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func emitLoadBalancer(a acc, lb types.LoadBalancer, emit *Emitter) {
 }
 
 func collectTargetGroups(ctx context.Context, cfg Config, a acc, emit *Emitter) error {
-	sdk, err := sdkConfig(ctx, cfg, a.region)
+	sdk, err := a.sdk(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -93,9 +93,42 @@ func collectTargetGroups(ctx context.Context, cfg Config, a acc, emit *Emitter) 
 		}
 		for _, tg := range page.TargetGroups {
 			emitTargetGroup(a, tg, emit)
+			emitTargetGroupTargets(ctx, client, a, tg, emit)
 		}
 	}
 	return nil
+}
+
+// emitTargetGroupTargets resolves what a target group actually forwards to.
+// Without it the request path stops at the load balancer: LB -> target group ->
+// (nothing), which is the hop that makes the diagram a request path rather than
+// an inventory.
+func emitTargetGroupTargets(ctx context.Context, client *elasticloadbalancingv2.Client, a acc, tg types.TargetGroup, emit *Emitter) {
+	arn := aws.ToString(tg.TargetGroupArn)
+	if arn == "" {
+		return
+	}
+	out, err := client.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{TargetGroupArn: aws.String(arn)})
+	if err != nil {
+		return // best effort: a missing target list must not fail the walker
+	}
+	for _, th := range out.TargetHealthDescriptions {
+		if th.Target == nil {
+			continue
+		}
+		id := aws.ToString(th.Target.Id)
+		if id == "" {
+			continue
+		}
+		switch string(tg.TargetType) {
+		case "instance":
+			emit.Send(a.edge(arn, a.ec2Arn("instance/"+id), "FORWARDS"))
+		case "lambda":
+			emit.Send(a.edge(arn, id, "FORWARDS")) // lambda targets are ARNs
+		}
+		// "ip" targets name an address, not a resource, so there is nothing to
+		// link to; the ENI walker already covers who owns that address.
+	}
 }
 
 func emitTargetGroup(a acc, tg types.TargetGroup, emit *Emitter) {

@@ -74,6 +74,9 @@ policy documents needed to detect it are already collected.
 | `sg-open-egress-all` | `[x]` | low | unrestricted egress to `0.0.0.0/0` | enables exfiltration and C2 callback | SC-7 |
 | `sg-default-in-use` | `[ ]` | medium | default security group with rules, or attached to resources | default SGs should deny everything | CIS 5.3 |
 | `sg-orphan` | `[x]` | low | SG attached to nothing | hygiene; also hides intent | — |
+| `sg-egress-established-ingress` | `[x]` | high | group with no ingress, internet egress, and egress to internal service ports | an outbound-established tunnel publishes internal services with no inbound rule — every AWS-side control reads "closed" while the service is reachable, gated by policy held outside the account | SC-7, AC-17 |
+| `ec2-bastion-data-tier-reach` | `[x]` | high | instance reachable from outside the VPC that also holds database-port reach | one host between an external allowlist and the data tier; the allowlist is usually operator addresses on networks nobody controls | SC-7, AC-4 |
+| `sg-flat-internal-range` | `[x]` | medium | group admitting every port across a whole internal CIDR | collapses the segmentation other groups provide: holding it equals holding everything it reaches | SC-7 |
 | `nacl-open-admin` | `[ ]` | high | NACL allowing `0.0.0.0/0` to 22/3389 | subnet-wide exposure beneath the SG layer | CIS 5.1 |
 | `ec2-public-ip` | `[x]` | medium | instance with a public IP | every public IP is attack surface that needs justifying | SC-7 |
 | `rds-publicly-accessible` | `[x]` | critical | RDS instance with `publicly_accessible=true` | database reachable from the internet | CIS 2.3.3 |
@@ -87,6 +90,25 @@ policy documents needed to detect it are already collected.
 | `lambda-public-policy` | `[ ]` | high | resource policy allowing `*` invoke | same, via the policy route | AC-3 |
 | `vpc-peering-broad-route` | `[ ]` | medium | route table sending a wide CIDR across a peering link | lateral movement between environments | CIS 5.4 |
 | `cross-env-edge` | `[x]` | high | traffic edge between resources tagged with different `env` | prod/non-prod blast-radius bleed | SC-7 |
+
+
+### Paths that bypass the exposure chain
+
+Most ingress checks walk a chain — internet gateway, a route to it, a public
+address, a permissive group — and a resource is reachable only when every link
+holds. Three classes of path bypass that chain entirely and need their own
+detectors, because every link reads "closed" while something outside still
+reaches in:
+
+- **Egress-established** — reverse tunnels, remote-access meshes, CI runners.
+  The session opens outbound, so no inbound rule exists to find.
+  (`sg-egress-established-ingress`)
+- **Managed proxies fronting private targets** — load balancers and API
+  gateways terminate outside the subnet the target sits in.
+- **IAM-gated paths** — SSM Session Manager, EC2 Instance Connect: reachable
+  with no network rule at all, governed by policy rather than by CIDR.
+
+A review that stops at security groups will not see any of them.
 
 ---
 

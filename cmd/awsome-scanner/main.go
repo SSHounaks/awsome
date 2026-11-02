@@ -63,10 +63,15 @@ func runOnce(cfg config.Config) {
 		snapshotID = "snap-" + nowStamp()
 	}
 
-	target, err := collect.ResolveTarget(ctx, cfg)
+	targets, unreachable, err := collect.ResolveTargets(ctx, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "resolve target:", err)
+		fmt.Fprintln(os.Stderr, "resolve targets:", err)
 		os.Exit(1)
+	}
+	// An account you cannot reach is reported, not fatal — in a real estate some
+	// accounts belong to other people.
+	for _, u := range unreachable {
+		fmt.Fprintf(os.Stderr, "skipped profile %q: %v\n", u.Profile, u.Err)
 	}
 
 	dir := filepath.Join(cfg.SnapshotDir, snapshotID)
@@ -88,7 +93,7 @@ func runOnce(cfg config.Config) {
 		werrCh <- werr
 	}()
 
-	runErr := collect.Run(ctx, cfg, target, snapshotID, emit)
+	runErr := collect.RunAll(ctx, cfg, targets, snapshotID, emit)
 	emit.Close()
 
 	stats := <-statsCh
@@ -100,7 +105,7 @@ func runOnce(cfg config.Config) {
 		status = "partial"
 	}
 
-	snapshot := collect.MakeSnapshot(snapshotID, target.AccountID, target.Partition, target.Regions, startedAt, status)
+	snapshot := collect.MakeSnapshotFor(snapshotID, targets, startedAt, status)
 	snapshot.FinishedAt = modelNow()
 	snapshot.Trigger = "manual"
 	snapshot.Statistics = stats
@@ -109,8 +114,9 @@ func runOnce(cfg config.Config) {
 	}
 
 	fmt.Printf("snapshot  %s (%s)\n", snapshotID, status)
-	fmt.Printf("account   %s partition %s\n", target.AccountID, target.Partition)
-	fmt.Printf("regions   %v\n", target.Regions)
+	for _, t := range targets {
+		fmt.Printf("account   %s partition %s regions %v (profile %q)\n", t.AccountID, t.Partition, t.Regions, t.Profile)
+	}
 	fmt.Printf("records   %s\n", recordsPath)
 	for k, v := range stats {
 		fmt.Printf("  %-20s %d\n", k, v)

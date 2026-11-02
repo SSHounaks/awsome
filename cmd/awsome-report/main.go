@@ -37,6 +37,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Terraform declarations, when awsome-tfstate has run against this snapshot.
+	if decls, derr := findings.LoadDeclarations(filepath.Join(*dir, "declared.jsonl")); derr != nil {
+		fmt.Fprintln(os.Stderr, "declarations:", derr)
+	} else {
+		g.Declarations = decls
+	}
+
 	fns := findings.Run(g)
 
 	baseline, err := findings.LoadBaseline(*baselinePath)
