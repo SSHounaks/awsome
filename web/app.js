@@ -244,7 +244,10 @@ const AwsNode = React.memo(function AwsNode({ data }) {
       : h("div", {
           className: "flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded font-mono text-[13px] font-bold",
           style: { background: data.accentColor ?? "#334155", color: "#0b1220" },
-        }, (data.label ?? "?").slice(0, 2)),
+          // resourceLabel, not label: the second line can be overridden to say
+          // something more useful than the type, and a two-letter badge reading
+          // "CR" off "cron(0 3 * * ? *)" helps nobody.
+        }, (data.resourceLabel ?? data.label ?? "?").slice(0, 2)),
     h("div", { className: "min-w-0 flex-1 leading-tight" },
       h("div", { className: "truncate font-mono text-[11.5px] font-medium text-slate-100" },
         (data.marker ?? "") + (data.name ?? "")),
@@ -606,6 +609,7 @@ function layoutArchitecture(graph, opts) {
 }
 
 const LANE_TITLES = {
+  EVENTBRIDGERULE: "EventBridge rules",
   S3BUCKET: "S3 buckets",
   ECRREPOSITORY: "ECR repositories",
   DYNAMODBTABLE: "DynamoDB tables",
@@ -626,6 +630,9 @@ const LANE_TITLES = {
  * cross-account trust is visible as a line between lanes.
  */
 const TIERS = [
+  // Upstream of the edge because a schedule is where a request comes from, the
+  // same way the internet is — it just arrives on a clock instead of a socket.
+  { id: "schedule", title: "Triggers", hint: "scheduled and event-driven", labels: ["EVENTBRIDGERULE"] },
   { id: "edge", title: "Edge", hint: "internet-facing", labels: ["IGW", "LB"] },
   { id: "compute", title: "Compute", hint: "application tier", labels: ["EC2", "LAMBDA", "ECSCLUSTER", "EKS", "ASG"] },
   { id: "data", title: "Data", hint: "state and artefacts", labels: ["RDS", "ELASTICACHE", "DYNAMODBTABLE", "REDSHIFT", "OPENSEARCH", "S3BUCKET", "ECRREPOSITORY"] },
@@ -728,6 +735,16 @@ const CLAIM_STYLE = {
     desc: "a load balancer sends requests here" },
   TRUSTS: { stroke: "#a78bfa", width: 1.4, dash: "5 4", z: 6,
     desc: "a role trust policy accepts this principal" },
+  // FIRES, not TRIGGERS: the collected edge is called TRIGGERS and is hidden in
+  // favour of this one, so the two must not share a name or hiding the raw edge
+  // would hide the claim that replaces it.
+  FIRES: { stroke: "#c026d3", width: 1.8, dash: "", z: 6,
+    desc: "an enabled EventBridge rule fires this on a schedule or an event" },
+  // A disabled rule is still wired to its target. Drawing that like a live one
+  // would state the opposite of the only fact worth knowing about it, so it
+  // gets the faint-dashes treatment reachability gets: wired, but nothing flows.
+  DORMANT: { stroke: "#c026d3", width: 1.4, dash: "3 4", z: 4, opacity: 0.5,
+    desc: "the rule names this target but is DISABLED — nothing fires" },
   REACHES: { stroke: "#475569", width: 1, dash: "3 4", z: 3, opacity: 0.55,
     desc: "a security group would admit the traffic; nothing proves anything flows" },
   // data-flow claims
@@ -1099,8 +1116,26 @@ function deriveArchEdges(graph) {
     push(INTERNET_ID, n.id, "FORWARDS");
   }
 
-  // --- 7. bundle: one line per pair, carrying how many grants it represents -
-  const RANK = { TUNNELS: 5, USES: 4, ADMITS: 3, FORWARDS: 2, REACHES: 1 };
+  // --- 7. what a schedule or an event fires --------------------------------
+  // A rule's target is a stated fact — the rule names it — so this needs no
+  // inference. The distinction worth drawing is whether the rule is switched
+  // on, because a DISABLED one leaves every resource it drives looking healthy.
+  // Targets the scanner does not collect (SNS topics, log groups) have no node
+  // to point at, so they are skipped rather than left dangling.
+  for (const e of graph.edges) {
+    if (e.type !== "TRIGGERS") continue;
+    const rule = byId.get(e.from);
+    if (!rule) continue;
+    const target = resolve(e.to);
+    if (!byId.has(target)) continue;
+    const live = rule.properties?.state !== "DISABLED";
+    push(e.from, target, live ? "FIRES" : "DORMANT");
+  }
+
+  // --- 8. bundle: one line per pair, carrying how many grants it represents -
+  // A rule naming its target outranks an IAM grant to the same pair: both are
+  // real, but "this fires it" is the more specific claim.
+  const RANK = { TUNNELS: 7, FIRES: 6, USES: 5, ADMITS: 4, FORWARDS: 3, DORMANT: 2, REACHES: 1 };
   const RISK = { high: 2, medium: 1 };
   const bundled = new Map();
   for (const e of edges) {
@@ -1119,6 +1154,16 @@ function deriveArchEdges(graph) {
     }
   }
   return { edges: [...bundled.values()], sources: [...sources.values()] };
+}
+
+// The second line of a node box normally repeats its type, which the icon and
+// the colour already carry. For a rule that line is the only place the two
+// things a reader needs can go: when it fires, and whether it is switched on.
+function tierNodeLabel(n) {
+  if (n.label !== "EVENTBRIDGERULE") return n.label;
+  const p = n.properties ?? {};
+  const when = p.schedule ?? (p.event_driven ? "on event" : "no schedule");
+  return p.state === "DISABLED" ? `${when} · DISABLED` : when;
 }
 
 function layoutTiered(graph, opts) {
@@ -1242,7 +1287,7 @@ function layoutTiered(graph, opts) {
           width: A_NODE_W, height: A_NODE_H,
           data: {
             name: n.name || n.id.split("/").pop().split(":").pop(),
-            label: n.label, marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
+            label: tierNodeLabel(n), marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
             resourceLabel: n.label, icon: iconFor(n.label, n.properties), iconKey: iconKey(n.label, n.properties),
             accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
             emphasised: Boolean(ov),
@@ -1259,7 +1304,11 @@ function layoutTiered(graph, opts) {
 
 // Containment is drawn as nesting in the architecture view, so those edges would
 // just be noise on top of it.
-const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS"]);
+// TRIGGERS joins them for a different reason: the architecture view replaces it
+// with the richer FIRES/DORMANT claim, and the component view is a containment
+// diagram that draws no edges at all — a rule's raw target line would be the
+// only one on it.
+const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS", "TRIGGERS"]);
 
 function layoutGraph(nodes, edges) {
   const g = new dagre.graphlib.Graph();
