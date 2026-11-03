@@ -111,6 +111,28 @@ func ruleTargets(ctx context.Context, client *eventbridge.Client, a acc, bus, ru
 	}
 }
 
+// taskPlacementEdges records the subnets and security groups the rule assigns
+// the task. These live on the rule target, not the task definition, which is
+// why an unscheduled job has no network position to draw at all.
+func taskPlacementEdges(a acc, family string, ep *types.EcsParameters) []model.Edge {
+	if ep == nil || ep.NetworkConfiguration == nil || ep.NetworkConfiguration.AwsvpcConfiguration == nil {
+		return nil
+	}
+	vpc := ep.NetworkConfiguration.AwsvpcConfiguration
+	var out []model.Edge
+	for _, s := range vpc.Subnets {
+		if s != "" {
+			out = append(out, a.edge(family, a.ec2Arn("subnet/"+s), "IN_SUBNET"))
+		}
+	}
+	for _, g := range vpc.SecurityGroups {
+		if g != "" {
+			out = append(out, a.edge(family, a.ec2Arn("security-group/"+g), "ASSOC_WITH"))
+		}
+	}
+	return out
+}
+
 func emitEventRule(a acc, r types.Rule, bus string, targets []types.Target, emit *Emitter) {
 	name := aws.ToString(r.Name)
 	n := a.now()
@@ -149,15 +171,25 @@ func emitEventRule(a acc, r types.Rule, bus string, targets []types.Target, emit
 	var taskDefs []string
 	seenRole := map[string]struct{}{}
 	for _, t := range targets {
-		// An ECS target's Arn is the *cluster*; the task definition is what names
-		// the job, and no other collector records it. Without this a scheduled
-		// cron is indistinguishable from any other rule pointed at the cluster.
+		// An ECS target's Arn is the *cluster*, which says nothing about which
+		// job runs. The rule fires a task definition; the cluster is merely
+		// where it lands. Pointing TRIGGERS at the job and giving the cluster
+		// its own edge makes the chain rule → job → cluster readable, and is
+		// what lets an unfired job be drawn as a job with nothing pointing at it.
 		if t.EcsParameters != nil {
 			if td := aws.ToString(t.EcsParameters.TaskDefinitionArn); td != "" {
 				taskDefs = append(taskDefs, td)
+				fam := familyOf(td)
+				edges = append(edges, a.edge(n.Key, fam, "TRIGGERS"))
+				if cluster := aws.ToString(t.Arn); cluster != "" {
+					edges = append(edges, a.edge(fam, cluster, "RUNS_ON"))
+				}
+				// Where the job runs is assigned by the rule, not the task
+				// definition — so a job no rule fires genuinely has no placement,
+				// and the network view must not invent one for it.
+				edges = append(edges, taskPlacementEdges(a, fam, t.EcsParameters)...)
 			}
-		}
-		if arn := aws.ToString(t.Arn); arn != "" {
+		} else if arn := aws.ToString(t.Arn); arn != "" {
 			edges = append(edges, a.edge(n.Key, arn, "TRIGGERS"))
 		}
 		// Several targets on one rule usually share an invocation role; emitting

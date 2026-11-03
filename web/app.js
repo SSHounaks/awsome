@@ -215,7 +215,7 @@ const COLORS = {
   LB: "#ec4899", TARGETGROUP: "#db2777", ASG: "#8b5cf6", DYNAMODBTABLE: "#2563eb",
   IAMPROFILE: "#a16207", IAMPOLICY: "#ca8a04", AMI: "#64748b", OPENSEARCH: "#0ea5e9",
   ECSCLUSTER: "#059669", EKS: "#0284c7", ECRREPOSITORY: "#4f46e5", FLOWLOG: "#71717a",
-  EVENTBRIDGERULE: "#c026d3",
+  EVENTBRIDGERULE: "#c026d3", ECSTASKDEF: "#10b981", ECSSERVICE: "#047857",
 };
 const FIND_COLORS = { critical: "#ef4444", high: "#f97316", medium: "#eab308", low: "#64748b" };
 
@@ -610,6 +610,8 @@ function layoutArchitecture(graph, opts) {
 
 const LANE_TITLES = {
   EVENTBRIDGERULE: "EventBridge rules",
+  ECSTASKDEF: "ECS task definitions",
+  ECSSERVICE: "ECS services",
   S3BUCKET: "S3 buckets",
   ECRREPOSITORY: "ECR repositories",
   DYNAMODBTABLE: "DynamoDB tables",
@@ -629,12 +631,17 @@ const LANE_TITLES = {
  * left-to-right in the direction traffic flows, with one lane per account so
  * cross-account trust is visible as a line between lanes.
  */
+// ECSTASKDEF is the job itself and ECSSERVICE is what holds a long-running one
+// up. Both belong with compute: a task definition carries a task role, so it
+// is a workload that can reach stores whether or not anything starts it.
+const COMPUTE_LABELS = ["EC2", "LAMBDA", "ECSCLUSTER", "ECSSERVICE", "ECSTASKDEF", "EKS", "ASG"];
+
 const TIERS = [
   // Upstream of the edge because a schedule is where a request comes from, the
   // same way the internet is — it just arrives on a clock instead of a socket.
   { id: "schedule", title: "Triggers", hint: "scheduled and event-driven", labels: ["EVENTBRIDGERULE"] },
   { id: "edge", title: "Edge", hint: "internet-facing", labels: ["IGW", "LB"] },
-  { id: "compute", title: "Compute", hint: "application tier", labels: ["EC2", "LAMBDA", "ECSCLUSTER", "EKS", "ASG"] },
+  { id: "compute", title: "Compute", hint: "application tier", labels: COMPUTE_LABELS },
   { id: "data", title: "Data", hint: "state and artefacts", labels: ["RDS", "ELASTICACHE", "DYNAMODBTABLE", "REDSHIFT", "OPENSEARCH", "S3BUCKET", "ECRREPOSITORY"] },
   { id: "identity", title: "Identity", hint: "assumable roles", labels: ["__trusted_role__"] },
 ];
@@ -745,6 +752,8 @@ const CLAIM_STYLE = {
   // gets the faint-dashes treatment reachability gets: wired, but nothing flows.
   DORMANT: { stroke: "#c026d3", width: 1.4, dash: "3 4", z: 4, opacity: 0.5,
     desc: "the rule names this target but is DISABLED — nothing fires" },
+  RUNS: { stroke: "#10b981", width: 1.8, dash: "", z: 6,
+    desc: "an ECS service holds this task definition running" },
   REACHES: { stroke: "#475569", width: 1, dash: "3 4", z: 3, opacity: 0.55,
     desc: "a security group would admit the traffic; nothing proves anything flows" },
   // data-flow claims
@@ -1132,10 +1141,20 @@ function deriveArchEdges(graph) {
     push(e.from, target, live ? "FIRES" : "DORMANT");
   }
 
+  // A long-running workload is held up by a service rather than fired by a
+  // rule. Both are "something starts this", and a task definition with neither
+  // is the thing worth seeing.
+  for (const e of graph.edges) {
+    if (e.type !== "RUNS") continue;
+    const target = resolve(e.to);
+    if (!byId.has(e.from) || !byId.has(target)) continue;
+    push(e.from, target, "RUNS");
+  }
+
   // --- 8. bundle: one line per pair, carrying how many grants it represents -
   // A rule naming its target outranks an IAM grant to the same pair: both are
   // real, but "this fires it" is the more specific claim.
-  const RANK = { TUNNELS: 7, FIRES: 6, USES: 5, ADMITS: 4, FORWARDS: 3, DORMANT: 2, REACHES: 1 };
+  const RANK = { TUNNELS: 8, FIRES: 7, RUNS: 6, USES: 5, ADMITS: 4, FORWARDS: 3, DORMANT: 2, REACHES: 1 };
   const RISK = { high: 2, medium: 1 };
   const bundled = new Map();
   for (const e of edges) {
@@ -1159,11 +1178,36 @@ function deriveArchEdges(graph) {
 // The second line of a node box normally repeats its type, which the icon and
 // the colour already carry. For a rule that line is the only place the two
 // things a reader needs can go: when it fires, and whether it is switched on.
-function tierNodeLabel(n) {
-  if (n.label !== "EVENTBRIDGERULE") return n.label;
-  const p = n.properties ?? {};
-  const when = p.schedule ?? (p.event_driven ? "on event" : "no schedule");
-  return p.state === "DISABLED" ? `${when} · DISABLED` : when;
+function tierNodeLabel(n, started) {
+  if (n.label === "EVENTBRIDGERULE") {
+    const p = n.properties ?? {};
+    const when = p.schedule ?? (p.event_driven ? "on event" : "no schedule");
+    return p.state === "DISABLED" ? `${when} · DISABLED` : when;
+  }
+  if (n.label === "ECSTASKDEF") {
+    // "no runner", not "never runs": nothing in the estate *declares* that it
+    // starts, but a task definition can still be launched by RunTask from
+    // application code or by hand. Overstating this would be the same mistake
+    // as hiding it.
+    const rev = n.properties?.latest_revision;
+    const tag = started?.has(n.id) ? `rev ${rev}` : `rev ${rev} · NO RUNNER`;
+    return tag;
+  }
+  if (n.label === "ECSSERVICE") {
+    const p = n.properties ?? {};
+    return `${p.running_count ?? "?"}/${p.desired_count ?? "?"} running`;
+  }
+  return n.label;
+}
+
+// startedTaskDefs is every task definition something declares it starts: an
+// EventBridge rule that fires it, or an ECS service that holds it up.
+function startedTaskDefs(graph) {
+  const started = new Set();
+  for (const e of graph.edges) {
+    if (e.type === "TRIGGERS" || e.type === "RUNS") started.add(e.to);
+  }
+  return started;
 }
 
 function layoutTiered(graph, opts) {
@@ -1180,6 +1224,7 @@ function layoutTiered(graph, opts) {
     inTrust.add(e.to);
   }
 
+  const started = startedTaskDefs(graph);
   const tierOf = (n) => {
     if (n.label === "IAMROLE") return inTrust.has(n.id) ? "identity" : null;
     for (const t of tiers) {
@@ -1287,7 +1332,7 @@ function layoutTiered(graph, opts) {
           width: A_NODE_W, height: A_NODE_H,
           data: {
             name: n.name || n.id.split("/").pop().split(":").pop(),
-            label: tierNodeLabel(n), marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
+            label: tierNodeLabel(n, started), marker: ov === "add" ? "+ " : ov === "mod" ? "~ " : "",
             resourceLabel: n.label, icon: iconFor(n.label, n.properties), iconKey: iconKey(n.label, n.properties),
             accentColor: ov === "add" ? "#4ade80" : ov === "mod" ? "#fbbf24" : (COLORS[n.label] ?? "#475569"),
             emphasised: Boolean(ov),
@@ -1308,7 +1353,7 @@ function layoutTiered(graph, opts) {
 // with the richer FIRES/DORMANT claim, and the component view is a containment
 // diagram that draws no edges at all — a rule's raw target line would be the
 // only one on it.
-const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS", "TRIGGERS"]);
+const ARCH_HIDDEN_EDGES = new Set(["IN_VPC", "IN_SUBNET", "PART_OF", "CONTAINS", "TRIGGERS", "RUNS", "RUNS_ON"]);
 
 function layoutGraph(nodes, edges) {
   const g = new dagre.graphlib.Graph();
@@ -1581,7 +1626,6 @@ function Diagram({ graph, findingsGraph, diffOverlay, view, region, findings, en
 /* ============================================================ */
 
 const STORE_LABELS = ["S3BUCKET", "RDS", "DYNAMODBTABLE", "ELASTICACHE", "ECRREPOSITORY", "REDSHIFT", "OPENSEARCH"];
-const COMPUTE_LABELS = ["EC2", "LAMBDA", "ECSCLUSTER", "EKS", "ASG"];
 
 const DATA_TIERS = [
   { id: "workload", title: "Workloads", hint: "what holds the credentials", labels: COMPUTE_LABELS },
@@ -1900,6 +1944,54 @@ function buildNetwork(graph, opts) {
     }
     vy += vpcH + 30;
   }
+
+  // A task definition's subnets are assigned by whatever starts it — the rule
+  // target, or the service. One that nothing starts has no placement at all, so
+  // it cannot be drawn inside a subnet without inventing a position AWS never
+  // assigned. It gets its own box instead: outside the network, which is
+  // precisely where it is.
+  const placed = new Set(graph.edges.filter((e) => e.type === "IN_SUBNET").map((e) => e.from));
+  // A task definition fired by a rule carries its own subnets, but one held up
+  // by a service does not — the placement sits on the service. Without this the
+  // box fills with every running API and processor, and the jobs that really
+  // have nowhere to run stop standing out, which was the whole point.
+  for (const e of graph.edges) {
+    if ((e.type === "RUNS" || e.type === "TRIGGERS") && placed.has(e.from)) placed.add(e.to);
+  }
+  const unplaced = graph.nodes
+    .filter((n) => n.label === "ECSTASKDEF" && !placed.has(n.id))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  if (unplaced.length) {
+    const cols = Math.min(3, unplaced.length);
+    const rows = Math.ceil(unplaced.length / cols);
+    const boxW = PADX * 2 + cols * W + (cols - 1) * GAP;
+    const boxH = VHEAD + rows * H + (rows - 1) * GAP + 16;
+    const gid = "__unplaced__";
+    nodes.push({
+      id: gid, type: "group", position: { x: 0, y: vy },
+      style: { width: boxW, height: boxH }, selectable: false, draggable: false, zIndex: 0,
+      data: {
+        title: "Not placed",
+        subtitle: `${unplaced.length} task definition(s)   ·   nothing assigns a subnet`,
+        fill: "rgba(248,113,113,0.04)", stroke: "#f87171", borderStyle: "dashed", borderWidth: 1,
+      },
+    });
+    unplaced.forEach((n, i) => {
+      const c = i % cols, r = Math.floor(i / cols);
+      nodes.push({
+        id: n.id, type: "aws", parentId: gid, extent: "parent",
+        position: { x: PADX + c * (W + GAP), y: VHEAD + r * (H + GAP) },
+        style: { width: W, height: H }, width: W, height: H,
+        data: {
+          name: n.name, label: "NO SUBNET", resourceLabel: "ECSTASKDEF",
+          icon: iconFor("ECSTASKDEF", n.properties), iconKey: iconKey("ECSTASKDEF", n.properties),
+          accentColor: "#f87171",
+          title: `${n.name}\nno EventBridge rule and no ECS service assigns this task definition a subnet\n${n.id}`,
+        },
+      });
+    });
+    vy += boxH + 30;
+  }
   return { nodes, edges };
 }
 
@@ -2217,14 +2309,42 @@ function architectureMermaid(nodes, edges, meta) {
     }
   };
 
+  // Mermaid refuses to render past 500 edges, and that limit is not overridable
+  // by an init directive — so an export above it is a file that renders nowhere,
+  // which is the same failure as not exporting at all. Collecting ECS task
+  // definitions put every task role's grants on this view and took it to 738.
+  //
+  // REACHES is the claim to give up: it states only that a security group would
+  // admit the traffic, never that anything flows. Everything that asserts a real
+  // relationship is kept — DORMANT especially, since a job nothing fires is the
+  // reason this view grew in the first place. What was dropped is written into
+  // the file, so the export is never quietly different from the canvas.
+  const MERMAID_MAX_EDGES = 480;
+  let drawnEdges = edges ?? [];
+  let omittedNote = "";
+  if (drawnEdges.length > MERMAID_MAX_EDGES) {
+    const before = drawnEdges.length;
+    const kept = drawnEdges.filter((e) => e.kind !== "REACHES");
+    if (kept.length < before) {
+      omittedNote = `omitted ${before - kept.length} reachability lines so this parses — Mermaid caps a diagram at 500 edges`;
+      drawnEdges = kept;
+    }
+  }
+  if (drawnEdges.length > MERMAID_MAX_EDGES) {
+    const before = drawnEdges.length;
+    drawnEdges = drawnEdges.slice(0, MERMAID_MAX_EDGES);
+    omittedNote = `truncated to ${MERMAID_MAX_EDGES} of ${before} edges so this parses — Mermaid caps a diagram at 500`;
+  }
+
   out.push(`%% ${lbl(meta.title)}`);
   if (meta.footer) out.push(`%% ${lbl(meta.footer)}`);
+  if (omittedNote) out.push(`%% ${lbl(omittedNote)}`);
   out.push("flowchart LR");
   emit("", 0);
 
   const linkStyles = [];
   let li = 0;
-  for (const e of edges ?? []) {
+  for (const e of drawnEdges) {
     if (!ids.has(e.source) && !byId.has(e.source)) continue;
     if (!byId.has(e.source) || !byId.has(e.target)) continue;
     const c = CLAIM_STYLE[e.kind] ?? { stroke: "#475569", width: 1.2, dash: "" };

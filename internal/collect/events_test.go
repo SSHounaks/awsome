@@ -98,9 +98,16 @@ func TestEmitEventRuleScheduledEcsCron(t *testing.T) {
 		t.Errorf("task definition = %q, want the target's", tds[0])
 	}
 
+	// TRIGGERS points at the job, not the cluster: the cluster is where the task
+	// lands, and a job nothing fires has to be drawable as a job with no inbound
+	// line. The cluster gets its own RUNS_ON edge from the job.
+	family := "arn:aws-us-gov:ecs:us-gov-west-1:111122223333:task-definition/atscene-prd2-cron-job-dnd-cleanup"
 	triggers := edgeTypes(edges, "TRIGGERS")
-	if len(triggers) != 1 || triggers[0].To != cluster {
-		t.Errorf("TRIGGERS edges = %+v, want one pointing at the cluster", triggers)
+	if len(triggers) != 1 || triggers[0].To != family {
+		t.Errorf("TRIGGERS edges = %+v, want one pointing at the task definition family", triggers)
+	}
+	if runs := edgeTypes(edges, "RUNS_ON"); len(runs) != 1 || runs[0].To != cluster {
+		t.Errorf("RUNS_ON edges = %+v, want one pointing at the cluster", runs)
 	}
 	if roles := edgeTypes(edges, "USES_ROLE"); len(roles) != 1 || roles[0].To != role {
 		t.Errorf("USES_ROLE edges = %+v, want one pointing at the invocation role", roles)
